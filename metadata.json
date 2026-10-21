@@ -1,0 +1,6 @@
+{
+  "name": "Yard Sloth",
+  "description": "Walk your yard once with your phone, confirm the plant list, and get a care calendar plus evening frost alerts with a deterministic, local-first multi-agent architecture.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
