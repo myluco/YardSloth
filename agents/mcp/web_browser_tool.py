@@ -21,6 +21,72 @@ class WebBrowserMCPTool:
     def __init__(self):
         self.user_agent = "YardSloth-MCP-Agent/1.0 (Horticultural Research Bot)"
 
+    def _looks_like_street_address(self, query: str) -> bool:
+        q = query.strip().lower()
+        if re.search(r"^\d+\s+\S", q):
+            return True
+        return bool(
+            re.search(
+                r"\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|way|ct|court|pl|place|cir|circle)\b",
+                q,
+            )
+        )
+
+    def _nominatim_us_postalcode(self, zip5: str) -> Optional[Dict[str, Any]]:
+        """US ZIP codes must use postalcode + countrycodes=us (free-text q=95135 hits Lithuania first)."""
+        try:
+            nom_url = (
+                "https://nominatim.openstreetmap.org/search?"
+                f"postalcode={urllib.parse.quote(zip5)}&countrycodes=us"
+                f"&format=json&addressdetails=1&limit=1"
+            )
+            req = urllib.request.Request(nom_url, headers={"User-Agent": self.user_agent})
+            with urllib.request.urlopen(req, timeout=8) as response:
+                res = json.loads(response.read().decode())
+                return res[0] if res else None
+        except Exception as e:
+            print("Nominatim US postalcode error:", e)
+            return None
+
+    def _nominatim_forward_search(
+        self, query: str, country_codes: str = "us"
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            nom_url = (
+                "https://nominatim.openstreetmap.org/search?"
+                f"q={urllib.parse.quote(query)}&countrycodes={country_codes}"
+                f"&format=json&addressdetails=1&limit=5"
+            )
+            req = urllib.request.Request(nom_url, headers={"User-Agent": self.user_agent})
+            with urllib.request.urlopen(req, timeout=8) as response:
+                res = json.loads(response.read().decode())
+                if not res:
+                    return None
+                for item in res:
+                    cc = (item.get("address") or {}).get("country_code", "").lower()
+                    if cc == "us":
+                        return item
+                return res[0]
+        except Exception as e:
+            print("Nominatim search error:", e)
+            return None
+
+    def _apply_nominatim_result(
+        self,
+        item: Dict[str, Any],
+        clean_query: str,
+    ) -> tuple[float, float, str, str, Optional[str], str]:
+        lat = float(item.get("lat", 45.51))
+        lon = float(item.get("lon", -122.68))
+        formatted = item.get("display_name", clean_query)
+        addr = item.get("address", {})
+        pc = addr.get("postcode")
+        detected_zip = pc[:5] if pc and re.match(r"^\d{5}", pc) else None
+        c = addr.get("city") or addr.get("town") or addr.get("village") or addr.get("hamlet")
+        st = addr.get("state")
+        city_name = f"{c}, {st}" if c and st else (c or formatted.split(",")[0])
+        return lat, lon, city_name, formatted, detected_zip, formatted
+
     def geocode_address_or_zip(self, query: str) -> Dict[str, Any]:
         """
         Geocodes any street address, city, state, or ZIP code live via Open-Meteo and Nominatim.
@@ -33,8 +99,9 @@ class WebBrowserMCPTool:
         lat = 45.51
         lon = -122.68
         city_name = clean_query
-        admin_state = ""
-        country = "US"
+        formatted_address = clean_query
+        geocode_confidence = "low"
+        open_meteo_results: list = []
 
         # Check if coordinates passed directly like "30.267,-97.743"
         coord_match = re.match(r'^\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*$', clean_query)
@@ -42,12 +109,14 @@ class WebBrowserMCPTool:
             lat = float(coord_match.group(1))
             lon = float(coord_match.group(2))
             city_name = f"GPS ({lat:.3f}, {lon:.3f})"
+            formatted_address = city_name
             # Reverse geocode via Nominatim to find city and zip
             try:
                 nom_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
                 req = urllib.request.Request(nom_url, headers={"User-Agent": self.user_agent})
-                with urllib.request.urlopen(req, timeout=5) as response:
+                with urllib.request.urlopen(req, timeout=8) as response:
                     rev_data = json.loads(response.read().decode())
+                    formatted_address = rev_data.get("display_name", formatted_address)
                     addr = rev_data.get("address", {})
                     pc = addr.get("postcode")
                     if pc and re.match(r'^\d{5}', pc):
@@ -56,51 +125,90 @@ class WebBrowserMCPTool:
                     st = addr.get("state", "")
                     if c:
                         city_name = f"{c}, {st}" if st else c
+                    geocode_confidence = "high"
             except Exception as e:
                 print("Reverse geocoding error:", e)
+        elif re.fullmatch(r"\d{5}", clean_query):
+            detected_zip = clean_query
+            nom_item = self._nominatim_us_postalcode(clean_query)
+            if nom_item:
+                lat, lon, city_name, formatted_address, nom_zip, _ = self._apply_nominatim_result(
+                    nom_item, clean_query
+                )
+                if nom_zip:
+                    detected_zip = nom_zip
+                geocode_confidence = "high"
+            else:
+                try:
+                    encoded = urllib.parse.quote(clean_query)
+                    url = (
+                        f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}"
+                        f"&count=5&language=en&format=json"
+                    )
+                    req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+                    with urllib.request.urlopen(req, timeout=6) as response:
+                        res_data = json.loads(response.read().decode())
+                        for top in res_data.get("results", []):
+                            if top.get("country_code") != "US":
+                                continue
+                            postcodes = top.get("postcodes") or []
+                            if clean_query not in postcodes and postcodes:
+                                continue
+                            lat = float(top.get("latitude", lat))
+                            lon = float(top.get("longitude", lon))
+                            name = top.get("name", clean_query)
+                            admin_state = top.get("admin1", "")
+                            city_name = f"{name}, {admin_state}" if admin_state else name
+                            formatted_address = f"{clean_query}, {city_name}, United States"
+                            geocode_confidence = "high"
+                            break
+                except Exception as e:
+                    print("Open-Meteo US ZIP fallback error:", e)
+        elif self._looks_like_street_address(clean_query):
+            nom_item = self._nominatim_forward_search(clean_query, country_codes="us")
+            if nom_item:
+                lat, lon, city_name, formatted_address, nom_zip, _ = self._apply_nominatim_result(
+                    nom_item, clean_query
+                )
+                if nom_zip:
+                    detected_zip = nom_zip
+                geocode_confidence = "high"
         else:
-            # 1. Geocode via Open-Meteo Geocoding API
+            # City / place names: Open-Meteo first, Nominatim if empty or missing postal code
             try:
                 encoded = urllib.parse.quote(clean_query)
                 url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded}&count=1&language=en&format=json"
                 req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
                 with urllib.request.urlopen(req, timeout=6) as response:
                     res_data = json.loads(response.read().decode())
-                    results = res_data.get("results", [])
-                    if results:
-                        top = results[0]
+                    open_meteo_results = res_data.get("results", [])
+                    us_results = [
+                        r for r in open_meteo_results if r.get("country_code") == "US"
+                    ]
+                    picks = us_results if us_results else open_meteo_results
+                    if picks:
+                        top = picks[0]
                         lat = float(top.get("latitude", lat))
                         lon = float(top.get("longitude", lon))
                         name = top.get("name", clean_query)
                         admin_state = top.get("admin1", "")
-                        country = top.get("country_code", "US")
                         city_name = f"{name}, {admin_state}" if admin_state else name
+                        formatted_address = city_name
                         if not detected_zip and top.get("postcodes"):
                             detected_zip = top["postcodes"][0]
+                        geocode_confidence = "high"
             except Exception as e:
                 print("Open-Meteo geocoding error:", e)
 
-            # 2. If no zip or city found, or if it was a detailed street address, query Nominatim
-            if not detected_zip or len(results if 'results' in locals() else []) == 0:
-                try:
-                    nom_url = f"https://nominatim.openstreetmap.org/search?q={urllib.parse.quote(clean_query)}&format=json&addressdetails=1&limit=1"
-                    req = urllib.request.Request(nom_url, headers={"User-Agent": self.user_agent})
-                    with urllib.request.urlopen(req, timeout=6) as response:
-                        res = json.loads(response.read().decode())
-                        if res:
-                            item = res[0]
-                            lat = float(item.get("lat", lat))
-                            lon = float(item.get("lon", lon))
-                            addr = item.get("address", {})
-                            pc = addr.get("postcode")
-                            if pc and re.match(r'^\d{5}', pc):
-                                detected_zip = pc[:5]
-                            c = addr.get("city") or addr.get("town") or addr.get("village")
-                            st = addr.get("state")
-                            if c:
-                                city_name = f"{c}, {st}" if st else c
-                except Exception as e:
-                    print("Nominatim fallback search error:", e)
+            if not open_meteo_results or not detected_zip:
+                nom_item = self._nominatim_forward_search(clean_query, country_codes="us")
+                if nom_item:
+                    lat, lon, city_name, formatted_address, nom_zip, _ = self._apply_nominatim_result(
+                        nom_item, clean_query
+                    )
+                    if nom_zip:
+                        detected_zip = nom_zip
+                    geocode_confidence = "high"
 
         # 3. Authentic USDA Plant Hardiness Zone lookup via phzmapi.org (PRISM Climate Group / USDA)
         zone = "7a"
@@ -161,9 +269,11 @@ class WebBrowserMCPTool:
         last_frost, first_frost = ZONE_FROST_SCHEDULE.get(numeric_prefix, ("04-01", "10-30"))
 
         return {
-            "status": "success",
+            "status": "success" if geocode_confidence == "high" else "low_confidence",
             "source": "PRISM Climate Group / USDA Plant Hardiness Zone Map & Open-Meteo",
             "query": clean_query,
+            "address": formatted_address,
+            "formatted_address": formatted_address,
             "city": city_name,
             "zip": detected_zip or "",
             "lat": lat,
@@ -172,6 +282,7 @@ class WebBrowserMCPTool:
             "temperature_range": temp_range,
             "last_spring_frost": last_frost,
             "first_fall_frost": first_frost,
+            "geocode_confidence": geocode_confidence,
         }
 
     def browse_weather_forecast(self, lat: float, lon: float) -> Dict[str, Any]:
@@ -213,100 +324,15 @@ class WebBrowserMCPTool:
 
     def browse_plant_care_knowledge(self, plant_name: str, species: Optional[str] = None) -> Dict[str, Any]:
         """
-        MCP web research tool. Browses online botanical databases on the fly
-        to extract bloom wood, pruning rules, and cold hardiness.
+        Plant care profiles via Ollama (structured JSON). No hardcoded species table.
         """
-        query = (species or plant_name).lower()
+        from agents.llm.ollama_client import OllamaError, fetch_plant_care_profile
 
-        if any(k in query for k in ["hydrangea macrophylla", "bigleaf hydrangea", "mophead"]):
-            return {
-                "common_name": "Bigleaf Hydrangea",
-                "species": "Hydrangea macrophylla",
-                "bloom_wood": "old_wood",
-                "prune_window": "Immediately after summer flowering (July-August); never prune in late fall or spring",
-                "prune_rules": "Deadhead spent blooms down to the first set of plump healthy buds. Only remove dead or hollow stems in early spring.",
-                "fertilize_window": "Early spring at bud break and late June",
-                "fertilize_type": "Balanced organic slow-release (10-10-10)",
-                "mulch_rules": "Apply 3 inches of pine bark mulch before ground freezing",
-                "frost_sensitivity": "semi_hardy",
-                "frost_threshold_f": 32,
-                "care_category": "shrub",
-                "source": "web_browse:mcp://missouribotanicalgarden.org/plantfinder"
-            }
-        elif any(k in query for k in ["tomato", "solanum lycopersicum"]):
-            return {
-                "common_name": "Tomato",
-                "species": "Solanum lycopersicum",
-                "bloom_wood": "not_applicable",
-                "prune_window": "Weekly pinching of suckers in leaf crotches",
-                "prune_rules": "Pinch suckers on indeterminate varieties; prune lowest foliage touching damp soil.",
-                "fertilize_window": "Every 2 weeks after first fruit cluster sets",
-                "fertilize_type": "Organic tomato food with calcium to prevent blossom end rot",
-                "mulch_rules": "Straw mulch after soil reaches 65°F",
-                "frost_sensitivity": "tender",
-                "frost_threshold_f": 36,
-                "care_category": "vegetable",
-                "source": "web_browse:mcp://extension.oregonstate.edu/gardening"
-            }
-        elif any(k in query for k in ["citrus", "lemon", "meyer lemon"]):
-            return {
-                "common_name": "Meyer Lemon",
-                "species": "Citrus x meyeri",
-                "bloom_wood": "both",
-                "prune_window": "Late winter after frost danger has passed",
-                "prune_rules": "Thin water sprouts and inward-facing branches to let light into center.",
-                "fertilize_window": "Three times yearly: early spring, early summer, late summer",
-                "fertilize_type": "Citrus fertilizer with iron, manganese, and zinc",
-                "mulch_rules": "Light mulch over root zone; keep 6 inches clear of trunk base",
-                "frost_sensitivity": "tender",
-                "frost_threshold_f": 34,
-                "care_category": "fruit_tree",
-                "source": "web_browse:mcp://ucanr.edu/citruscare"
-            }
-        elif any(k in query for k in ["rose", "rosa"]):
-            return {
-                "common_name": "Garden Rose",
-                "species": "Rosa spp.",
-                "bloom_wood": "new_wood",
-                "prune_window": "Late winter to early spring as forsythia blooms",
-                "prune_rules": "Remove dead wood and crossing canes. Prune at 45-degree angle 1/4 inch above outward-facing bud.",
-                "fertilize_window": "Monthly from spring leaf-out until 6 weeks before first fall frost",
-                "fertilize_type": "Balanced organic rose food with magnesium",
-                "mulch_rules": "Mound 8 inches around graft union before deep winter",
-                "frost_sensitivity": "semi_hardy",
-                "frost_threshold_f": 28,
-                "care_category": "shrub",
-                "source": "web_browse:mcp://rhs.org.uk/roses"
-            }
-        elif any(k in query for k in ["lavender", "lavandula"]):
-            return {
-                "common_name": "English Lavender",
-                "species": "Lavandula angustifolia",
-                "bloom_wood": "old_wood",
-                "prune_window": "Immediately after summer flowering",
-                "prune_rules": "Trim flowering stems and 1 inch of green growth. Never cut into leafless old wood.",
-                "fertilize_window": "Light compost in spring; avoid nitrogen",
-                "fertilize_type": "Lean well-draining soil",
-                "mulch_rules": "Gravel or pea stone rather than wood mulch",
-                "frost_sensitivity": "hardy",
-                "frost_threshold_f": 20,
-                "care_category": "herb",
-                "source": "web_browse:mcp://rhs.org.uk/lavender"
-            }
-        else:
-            return {
-                "common_name": plant_name.title(),
-                "species": species or f"{plant_name.title()} spp.",
-                "bloom_wood": "new_wood",
-                "prune_window": "Early spring before active vegetative surge",
-                "prune_rules": "Prune dead, damaged, and crossing branches with clean sterilized shears.",
-                "fertilize_window": "Mid-spring once new shoots emerge",
-                "fertilize_type": "Organic all-purpose balanced fertilizer (10-10-10)",
-                "mulch_rules": "2-3 inches of organic compost or bark mulch",
-                "frost_sensitivity": "semi_hardy",
-                "frost_threshold_f": 30,
-                "care_category": "shrub",
-                "source": f"web_browse:mcp://botany-search/{urllib.parse.quote(plant_name)}"
-            }
+        try:
+            return fetch_plant_care_profile(plant_name, species)
+        except OllamaError:
+            raise
+        except Exception as exc:
+            raise OllamaError(f"Plant care lookup failed: {exc}") from exc
 
 mcp_browser = WebBrowserMCPTool()

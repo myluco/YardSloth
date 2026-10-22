@@ -113,11 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Zone 3: 1 Primary Action + Story Link */}
           <div className="flex items-center gap-3 shrink-0">
-            <button
-              onClick={onOpenStory}
-              className="hidden lg:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-stone-700 hover:text-stone-950 bg-stone-100 hover:bg-stone-200/70 rounded-lg transition-colors whitespace-nowrap"
-              title="CrewAI + Ollama Architecture & Blog Outline"
-            >
+  
               <BookOpen className="w-3.5 h-3.5 text-stone-500" />
               Architecture & Post
             </button>

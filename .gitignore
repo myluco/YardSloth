@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+data/yard_sloth.json
+data/yard_sloth_*.json
+__pycache__/

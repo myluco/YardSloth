@@ -6,6 +6,8 @@ export interface PlantCandidate {
   id: string;
   photo_url?: string;
   location_label: string;
+  /** All yard spots where this plant record appears (same species can span multiple labels). */
+  location_labels?: string[];
   common_name: string;
   species: string;
   genus: string;
@@ -18,6 +20,7 @@ export interface PlantCandidate {
   confirmed: boolean;
   notes?: string;
   created_at?: string;
+  source?: string;
 }
 
 export type TaskType = 'prune' | 'fertilize' | 'mulch' | 'frost_protect' | 'harvest' | 'inspect';
@@ -36,6 +39,12 @@ export interface GardenTask {
   priority: 'low' | 'normal' | 'high';
 }
 
+export interface EveningChecklistItem {
+  id: string;
+  title: string;
+  description: string;
+}
+
 export interface FrostAlert {
   id: string;
   date: string;
@@ -50,6 +59,7 @@ export interface FrostAlert {
 
 export interface Settings {
   address?: string;
+  formatted_address?: string;
   zip: string;
   city: string;
   lat?: number;
@@ -62,6 +72,8 @@ export interface Settings {
   ollama_model?: string;
   ollama_endpoint?: string;
   mock_frost_simulation: boolean;
+  last_location_label?: string;
+  yard_location_labels?: string[];
 }
 
 export interface ForecastDay {

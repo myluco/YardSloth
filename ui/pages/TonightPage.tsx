@@ -5,19 +5,20 @@ import {
   RefreshCw,
   Check,
   MapPin,
-  Navigation,
+  Loader2,
+  Sparkles,
 } from 'lucide-react';
-import { ForecastDay, FrostAlert, PlantCandidate } from '../shared/types';
+import { ForecastDay, FrostAlert, PlantCandidate, EveningChecklistItem } from '../shared/types';
+import { formatPlantLocations } from '../shared/yardLocations';
+import { api } from '../shared/api';
 
 interface TonightPageProps {
   forecast: ForecastDay[];
   alert: FrostAlert | null;
   plants: PlantCandidate[];
-  simulationActive: boolean;
   settings: any;
   onUpdateLocation: (query: string) => Promise<void>;
   onUseGPS: () => Promise<void>;
-  onToggleSimulation: () => void;
   onRefresh: () => void;
 }
 
@@ -25,23 +26,21 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   forecast,
   alert,
   plants,
-  simulationActive,
   settings,
   onUpdateLocation,
   onUseGPS,
-  onToggleSimulation,
   onRefresh,
 }) => {
   const [addressInput, setAddressInput] = useState(settings.address || settings.city || settings.zip || '');
   const [isUpdatingLoc, setIsUpdatingLoc] = useState(false);
   const [locSuccess, setLocSuccess] = useState(false);
 
-  const [checklist, setChecklist] = useState<Record<string, boolean>>({
-    step1: false,
-    step2: false,
-    step3: false,
-    step4: false,
-  });
+  const [checklistItems, setChecklistItems] = useState<EveningChecklistItem[] | null>(null);
+  const [checklistChecked, setChecklistChecked] = useState<Record<string, boolean>>({});
+  const [checklistSource, setChecklistSource] = useState<string | null>(null);
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [checklistError, setChecklistError] = useState<string | null>(null);
+  const [checklistNotice, setChecklistNotice] = useState<string | null>(null);
 
   const handleLocationSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,7 +56,31 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   };
 
   const toggleCheck = (id: string) => {
-    setChecklist((prev) => ({ ...prev, [id]: !prev[id] }));
+    setChecklistChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  const requestEveningChecklist = async () => {
+    setChecklistLoading(true);
+    setChecklistError(null);
+    setChecklistNotice(null);
+    try {
+      const result = await api.generateEveningChecklist();
+      if (result.message && (!result.items || result.items.length === 0)) {
+        setChecklistItems(null);
+        setChecklistNotice(result.message);
+        return;
+      }
+      setChecklistItems(result.items);
+      setChecklistSource(result.source);
+      setChecklistChecked({});
+      if (result.tonight_low_f != null) {
+        setChecklistNotice(`Planned for an effective low of ${result.tonight_low_f}°F tonight.`);
+      }
+    } catch (err) {
+      setChecklistError(err instanceof Error ? err.message : 'Could not build checklist.');
+    } finally {
+      setChecklistLoading(false);
+    }
   };
 
   const isFreezing = alert && (alert.severity === 'warning' || alert.severity === 'danger');
@@ -93,30 +116,7 @@ export const TonightPage: React.FC<TonightPageProps> = ({
             </p>
           </div>
 
-          <form onSubmit={handleLocationSubmit} className="flex items-center gap-2 w-full lg:w-auto">
-            <input
-              type="text"
-              value={addressInput}
-              onChange={(e) => setAddressInput(e.target.value)}
-              placeholder="e.g. 123 Main St, Austin TX, or 78704"
-              className="px-3 py-2 text-xs rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 min-w-[220px] sm:min-w-[280px] bg-stone-50/50"
-            />
-            <button
-              type="submit"
-              disabled={isUpdatingLoc || !addressInput.trim()}
-              className="px-3.5 py-2 text-xs font-semibold text-white bg-stone-900 hover:bg-stone-800 disabled:opacity-50 rounded-xl transition-all whitespace-nowrap shadow-2xs"
-            >
-              {isUpdatingLoc ? 'Locating...' : 'Set Address'}
-            </button>
-            <button
-              type="button"
-              onClick={onUseGPS}
-              className="p-2 text-stone-600 hover:text-stone-900 hover:bg-stone-100 border border-stone-200 rounded-xl transition-colors shrink-0"
-              title="Use my device GPS coordinates"
-            >
-              <Navigation className="w-4 h-4 text-emerald-700" />
-            </button>
-          </form>
+
         </div>
         {locSuccess && (
           <div className="mt-3 pt-3 border-t border-stone-100 flex items-center gap-1.5 text-xs text-emerald-800 font-semibold">
@@ -305,7 +305,7 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                           {plant.species}
                         </div>
                         <div className="text-[11px] text-stone-600 mt-1">
-                          Location: {plant.location_label}
+                          Location: {formatPlantLocations(plant)}
                         </div>
                       </div>
                       <div className="mt-2 pt-2 border-t border-stone-100 text-[11px] font-medium text-amber-900">
@@ -353,7 +353,7 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                           {plant.species}
                         </div>
                         <div className="text-[11px] text-stone-600 mt-1">
-                          Location: {plant.location_label}
+                          Location: {formatPlantLocations(plant)}
                         </div>
                       </div>
                       <div className="mt-2 pt-2 border-t border-stone-100 text-[11px] text-stone-700">
@@ -398,88 +398,99 @@ export const TonightPage: React.FC<TonightPageProps> = ({
               Evening Action Checklist
             </h3>
             <p className="text-xs text-stone-500 mt-0.5 mb-4">
-              Complete these steps before sundown.
+              Not shown until you ask. The Frost Watch agent reviews your confirmed plants and tonight&apos;s forecast, then suggests steps for this evening only.
             </p>
 
-            <div className="space-y-3">
-              {[
-                {
-                  id: 'step1',
-                  title: 'Carry potted citrus & tender herbs indoors',
-                  desc: 'Potted roots freeze much faster than ground soil. Place in garage, sunroom, or entryway.',
-                },
-                {
-                  id: 'step2',
-                  title: 'Harvest mature tomatoes & peppers',
-                  desc: 'Green fruits will ripen in a paper bag indoors. Cold below 36°F ruins texture.',
-                },
-                {
-                  id: 'step3',
-                  title: 'Drape frost cloth over old-wood hydrangeas',
-                  desc: 'Anchor edges with garden stones against wind gusts. Avoid heavy plastic.',
-                },
-                {
-                  id: 'step4',
-                  title: 'Disconnect garden hoses from sillcocks',
-                  desc: 'Trapped water expands upon freezing and can fracture brass valves inside wall.',
-                },
-              ].map((item) => {
-                const checked = checklist[item.id];
-                return (
-                  <button
-                    key={item.id}
-                    onClick={() => toggleCheck(item.id)}
-                    className={`w-full text-left p-3.5 rounded-xl border transition-all flex items-start gap-3 ${
-                      checked
-                        ? 'bg-emerald-50/70 border-emerald-200/80 text-stone-600'
-                        : 'bg-white border-stone-200 hover:border-stone-300 text-stone-900 shadow-2xs'
-                    }`}
-                  >
-                    <div
-                      className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                        checked ? 'bg-emerald-700 text-white' : 'border border-stone-300 bg-stone-50'
+            {checklistError && (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-3">
+                {checklistError}
+              </p>
+            )}
+            {checklistNotice && !checklistItems?.length && (
+              <p className="text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 mb-3">
+                {checklistNotice}
+              </p>
+            )}
+
+            {checklistItems === null ? (
+              <button
+                type="button"
+                disabled={checklistLoading || plants.length === 0}
+                onClick={() => void requestEveningChecklist()}
+                className="w-full py-3 px-4 rounded-xl font-semibold text-sm bg-emerald-800 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+              >
+                {checklistLoading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Agent evaluating your yard…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Build my evening checklist
+                  </>
+                )}
+              </button>
+            ) : (
+              <div className="space-y-3">
+                {checklistNotice && (
+                  <p className="text-[11px] text-stone-500">{checklistNotice}</p>
+                )}
+                {checklistSource && (
+                  <p className="text-[10px] font-mono text-stone-400">Source: {checklistSource}</p>
+                )}
+                {checklistItems.map((item) => {
+                  const checked = checklistChecked[item.id];
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => toggleCheck(item.id)}
+                      className={`w-full text-left p-3.5 rounded-xl border transition-all flex items-start gap-3 ${
+                        checked
+                          ? 'bg-emerald-50/70 border-emerald-200/80 text-stone-600'
+                          : 'bg-white border-stone-200 hover:border-stone-300 text-stone-900 shadow-2xs'
                       }`}
                     >
-                      {checked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
-                    </div>
-                    <div>
                       <div
-                        className={`text-xs sm:text-sm font-semibold ${
-                          checked ? 'line-through text-stone-500' : 'text-stone-900'
+                        className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
+                          checked ? 'bg-emerald-700 text-white' : 'border border-stone-300 bg-stone-50'
                         }`}
                       >
-                        {item.title}
+                        {checked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
                       </div>
-                      <p className="text-[11px] sm:text-xs text-stone-500 mt-0.5 leading-snug">
-                        {item.desc}
-                      </p>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+                      <div>
+                        <div
+                          className={`text-xs sm:text-sm font-semibold ${
+                            checked ? 'line-through text-stone-500' : 'text-stone-900'
+                          }`}
+                        >
+                          {item.title}
+                        </div>
+                        <p className="text-[11px] sm:text-xs text-stone-500 mt-0.5 leading-snug">
+                          {item.description}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
+                <button
+                  type="button"
+                  disabled={checklistLoading}
+                  onClick={() => void requestEveningChecklist()}
+                  className="w-full py-2.5 px-4 rounded-xl font-medium text-xs bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 transition-colors flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Re-run your evening checklist
+                </button>
+              </div>
+            )}
 
-          {/* Simulation Toggle */}
-          <div className="bg-stone-100/80 rounded-2xl p-5 border border-stone-200/80 text-xs space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-stone-900">
-                Cold Snap Scenario Test
-              </span>
-              <span className="font-mono text-[11px] text-stone-500">
-                Agent Evaluator
-              </span>
-            </div>
-            <p className="text-stone-600 leading-relaxed">
-              Default mode is 100% genuine live weather from Open-Meteo. Click below to test how Yard Sloth alerts you if an overnight cold snap (31°F) is predicted.
-            </p>
-            <button
-              onClick={onToggleSimulation}
-              className="w-full py-2.5 px-4 rounded-xl font-medium text-xs bg-white hover:bg-stone-50 border border-stone-300 text-stone-800 shadow-2xs transition-colors flex items-center justify-center gap-2"
-            >
-              <RefreshCw className="w-3.5 h-3.5 text-stone-500" />
-              {simulationActive ? 'Return to 100% Live Forecast' : 'Test Cold Snap Alert (31°F)'}
-            </button>
+            {plants.length === 0 && (
+              <p className="text-[11px] text-stone-500 mt-3">
+                Confirm at least one plant in Plants &amp; Census to generate a checklist.
+              </p>
+            )}
           </div>
         </div>
       </div>

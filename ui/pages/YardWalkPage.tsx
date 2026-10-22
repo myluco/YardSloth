@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   Camera,
   MapPin,
@@ -7,22 +7,27 @@ import {
   Loader2,
   ArrowRight,
   Leaf,
-  Layers,
   Sparkles,
 } from 'lucide-react';
-import { PlantCandidate } from '../shared/types';
+import { PlantCandidate, Settings } from '../shared/types';
+import { collectInUseLocationLabels } from '../shared/yardLocations';
 import { api } from '../shared/api';
 
 interface YardWalkPageProps {
-  onCandidateAdded: (candidate: PlantCandidate) => void;
+  settings: Settings;
+  plants: PlantCandidate[];
+  onCandidateAdded: (candidate: PlantCandidate, settings?: Settings) => Promise<void>;
   onGoToConfirm: () => void;
 }
 
 export const YardWalkPage: React.FC<YardWalkPageProps> = ({
+  settings,
+  plants,
   onCandidateAdded,
   onGoToConfirm,
 }) => {
-  const [locationLabel, setLocationLabel] = useState('Front bed, left of steps');
+  const [locationLabel, setLocationLabel] = useState('');
+  const [plantName, setPlantName] = useState('');
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisLogs, setAnalysisLogs] = useState<
@@ -33,22 +38,17 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const samplePlants = [
-    { name: 'Bigleaf Hydrangea', location: 'Front border steps', species: 'Hydrangea macrophylla' },
-    { name: 'San Marzano Tomato', location: 'Cedar raised box #1', species: 'Solanum lycopersicum' },
-    { name: 'Meyer Lemon', location: 'South deck container', species: 'Citrus x meyeri' },
-    { name: 'Garden Rose', location: 'Walkway trellised arbor', species: 'Rosa spp.' },
-    { name: 'English Lavender', location: 'West rockery terrace', species: 'Lavandula angustifolia' },
-    { name: 'Common Fig', location: 'South stone wall espalier', species: 'Ficus carica' },
-  ];
+  const plantLocationOptions = useMemo(
+    () => collectInUseLocationLabels(plants),
+    [plants]
+  );
 
-  const presetLocations = [
-    'Front bed, left of steps',
-    'Cedar raised box #1',
-    'South deck containers',
-    'Walkway trellised arbor',
-    'East fence shade border',
-  ];
+  useEffect(() => {
+    const last = (settings.last_location_label || '').trim();
+    if (last && plantLocationOptions.includes(last)) {
+      setLocationLabel(last);
+    }
+  }, [settings.last_location_label, plantLocationOptions]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -62,15 +62,26 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
     }
   };
 
-  const runCensusAgent = async (options: { sampleSpecies?: string; base64?: string }) => {
+  const runCensusAgent = async (base64?: string) => {
+    const name = plantName.trim();
+    const yardSpot = locationLabel.trim();
+    if (!yardSpot) {
+      setErrorMsg('Enter a location label for where this plant is in your yard (e.g. Frontyard).');
+      return;
+    }
+    if (!name) {
+      setErrorMsg('Enter a plant name (common or scientific). You can add a photo too.');
+      return;
+    }
+
     setIsAnalyzing(true);
     setErrorMsg(null);
     setLastFoundCandidate(null);
 
     const initialSteps = [
       { step: '1. Plant Census Agent (Python CrewAI) initialized', status: 'running' as const },
-      { step: '2. Dispatching MCP web browsing tool: web_browse_plant_care', status: 'pending' as const },
-      { step: '3. Extracting botanical leaf margins and bloom wood traits on the fly', status: 'pending' as const },
+      { step: '2. Querying Ollama (gemma4:31b-cloud) for botanical care profile', status: 'pending' as const },
+      { step: '3. Parsing structured JSON: bloom wood, frost threshold, pruning rules', status: 'pending' as const },
       { step: '4. Zero disk storage: saving directly into agent ephemeral memory', status: 'pending' as const },
       { step: '5. Candidate prepared for human-in-the-loop review', status: 'pending' as const },
     ];
@@ -93,9 +104,10 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
       ]);
 
       const result = await api.identifyPlant({
-        location_label: locationLabel,
-        image_base64: options.base64 || selectedPhoto || undefined,
-        sample_species: options.sampleSpecies,
+        location_label: yardSpot,
+        plant_name: name,
+        image_base64: base64 ?? selectedPhoto ?? undefined,
+        sample_species: name,
       });
 
       await new Promise((r) => setTimeout(r, 500));
@@ -117,7 +129,7 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
       ]);
 
       setLastFoundCandidate(result.candidate);
-      onCandidateAdded(result.candidate);
+      await onCandidateAdded(result.candidate, result.settings);
     } catch (err: any) {
       console.error(err);
       setErrorMsg(err.message || 'Plant identification failed');
@@ -145,7 +157,7 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
               Walk Your Yard, Snap What You See
             </h1>
             <p className="mt-1.5 text-xs sm:text-sm text-stone-300 leading-relaxed">
-              Capture plants with your phone. The Census Agent identifies the specimen and bloom wood classification via live MCP lookup, queuing candidates for your review.
+              Type the plant name, add an optional photo, and the Census Agent pulls bloom wood and care traits via live MCP lookup for your review.
             </p>
           </div>
         </div>
@@ -156,10 +168,12 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
         <div className="lg:col-span-7 space-y-6">
           <div className="bg-white rounded-2xl p-6 border border-stone-200/80 shadow-2xs">
             <h2 className="text-lg font-bold font-display text-stone-900 mb-1">
-              1. Location & Photo Capture
+              1. Location, Plant Name & Photo
             </h2>
             <p className="text-xs text-stone-500 mb-5">
-              Tag the location so tasks specify exact beds in your yard.
+              The <strong className="text-stone-700">location label</strong> marks where this plant lives in your yard.
+              The same species can be added many times with different labels (e.g. two hydrangeas in different beds).
+              Quick picks below come from locations you already use on confirmed plants.
             </p>
 
             <div className="space-y-3 mb-6">
@@ -172,13 +186,14 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
                   type="text"
                   value={locationLabel}
                   onChange={(e) => setLocationLabel(e.target.value)}
-                  placeholder="e.g. Front bed, left of steps"
+                  placeholder="Frontyard"
                   className="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 bg-white"
                 />
               </div>
 
+              {plantLocationOptions.length > 0 && (
               <div className="flex flex-wrap gap-1.5 pt-1">
-                {presetLocations.map((loc) => (
+                {plantLocationOptions.map((loc) => (
                   <button
                     key={loc}
                     onClick={() => setLocationLabel(loc)}
@@ -192,12 +207,35 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
                   </button>
                 ))}
               </div>
+              )}
+            </div>
+
+            <div className="space-y-3 mb-6">
+              <label className="block text-xs font-semibold text-stone-700">
+                Plant name (common or scientific)
+              </label>
+              <div className="relative">
+                <Leaf className="w-4 h-4 absolute left-3 top-3 text-stone-400" />
+                <input
+                  type="text"
+                  value={plantName}
+                  onChange={(e) => {
+                    setPlantName(e.target.value);
+                    setErrorMsg(null);
+                  }}
+                  placeholder="e.g. Bigleaf Hydrangea or Hydrangea macrophylla"
+                  className="w-full pl-9 pr-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 bg-white"
+                />
+              </div>
+              <span className="block text-[11px] text-stone-400">
+                Required. Ollama (gemma4:31b-cloud) generates the care profile from this name.
+              </span>
             </div>
 
             {/* Photo Capture Area */}
             <div className="space-y-4">
               <label className="block text-xs font-semibold text-stone-700">
-                Take Photo or Upload Image
+                Photo (optional)
               </label>
 
               <input
@@ -240,9 +278,39 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
                 </div>
               )}
 
+              {errorMsg ? (
+                <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-xl px-3 py-2">
+                  {errorMsg}
+                </p>
+              ) : null}
+
+              {lastFoundCandidate && !isAnalyzing ? (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 space-y-3">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle className="w-5 h-5 text-emerald-800 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-sm font-semibold text-stone-900">
+                        Queued for review: {lastFoundCandidate.common_name}
+                      </p>
+                      <p className="text-xs text-stone-600 mt-0.5">
+                        Open <strong>Plants &amp; Census</strong> and confirm to add it to your yard.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onGoToConfirm}
+                    className="w-full py-2.5 px-4 rounded-xl font-semibold text-xs bg-emerald-800 text-white hover:bg-emerald-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    Review &amp; confirm plant
+                    <ArrowRight className="w-4 h-4" />
+                  </button>
+                </div>
+              ) : null}
+
               <button
-                disabled={isAnalyzing || !selectedPhoto}
-                onClick={() => runCensusAgent({ base64: selectedPhoto! })}
+                disabled={isAnalyzing || !plantName.trim()}
+                onClick={() => runCensusAgent()}
                 className="w-full py-3 px-4 rounded-xl font-semibold text-sm bg-stone-900 text-stone-50 hover:bg-stone-800 active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed shadow-xs transition-all flex items-center justify-center gap-2"
               >
                 {isAnalyzing ? (
@@ -253,144 +321,15 @@ export const YardWalkPage: React.FC<YardWalkPageProps> = ({
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4 text-emerald-300" />
-                    Identify with Plant Census Agent
+                    Identify Plant
                   </>
                 )}
               </button>
             </div>
           </div>
-
-          {/* Quick Test Samples */}
-          <div className="bg-stone-50 rounded-2xl p-6 border border-stone-200/80">
-            <div className="flex items-center gap-2 mb-2">
-              <Leaf className="w-4 h-4 text-emerald-700" />
-              <h3 className="text-sm font-bold font-display text-stone-900">
-                Quick Test Samples (Instant Desktop Testing)
-              </h3>
-            </div>
-            <p className="text-xs text-stone-500 mb-4 leading-relaxed">
-              Click any sample below to execute the Python Census Agent and dispatch the live MCP botanical web lookup tool.
-            </p>
-
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-              {samplePlants.map((s) => (
-                <button
-                  key={s.name}
-                  disabled={isAnalyzing}
-                  onClick={() => {
-                    setLocationLabel(s.location);
-                    runCensusAgent({ sampleSpecies: s.name });
-                  }}
-                  className="text-left p-3 rounded-xl border border-stone-200 bg-white hover:border-emerald-700/50 hover:bg-emerald-50/20 text-xs transition-all disabled:opacity-50"
-                >
-                  <div className="font-semibold text-stone-900 truncate">
-                    {s.name}
-                  </div>
-                  <div className="text-[11px] text-stone-500 truncate italic">
-                    {s.species}
-                  </div>
-                  <div className="text-[10px] text-emerald-800 mt-1 font-medium">
-                    Run Census →
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
 
-        {/* Right Column: Execution Trace */}
-        <div className="lg:col-span-5 space-y-6">
-          <div className="bg-white rounded-2xl p-6 border border-stone-200/80 shadow-2xs">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-bold font-display text-stone-900 flex items-center gap-2">
-                <Layers className="w-4 h-4 text-stone-600" />
-                Live Agent Execution Trace
-              </h3>
-              <span className="text-[11px] font-mono text-stone-500">
-                Python CrewAI + MCP
-              </span>
-            </div>
 
-            {analysisLogs.length === 0 ? (
-              <div className="text-center py-8 text-stone-400 text-xs">
-                Agent is idle. Select a photo or sample plant to inspect the reasoning chain.
-              </div>
-            ) : (
-              <div className="space-y-3 font-mono text-xs">
-                {analysisLogs.map((log, i) => (
-                  <div
-                    key={i}
-                    className={`p-2.5 rounded-lg border flex items-start gap-2.5 transition-all ${
-                      log.status === 'running'
-                        ? 'bg-amber-50/70 border-amber-200 text-amber-950 animate-pulse'
-                        : log.status === 'done'
-                        ? 'bg-emerald-50/60 border-emerald-200/60 text-emerald-950'
-                        : 'bg-stone-50 border-stone-100 text-stone-400'
-                    }`}
-                  >
-                    {log.status === 'running' && (
-                      <Loader2 className="w-3.5 h-3.5 text-amber-700 animate-spin shrink-0 mt-0.5" />
-                    )}
-                    {log.status === 'done' && (
-                      <CheckCircle className="w-3.5 h-3.5 text-emerald-700 shrink-0 mt-0.5" />
-                    )}
-                    {log.status === 'pending' && (
-                      <div className="w-3.5 h-3.5 rounded-full border border-stone-300 shrink-0 mt-0.5" />
-                    )}
-                    <span className="leading-snug">{log.step}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {errorMsg && (
-              <div className="mt-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{errorMsg}</span>
-              </div>
-            )}
-          </div>
-
-          {lastFoundCandidate && (
-            <div className="bg-emerald-50/80 rounded-2xl p-6 border border-emerald-200 shadow-2xs space-y-4">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-emerald-800 font-mono">
-                  Candidate Ready for Confirmation
-                </span>
-                <span className="font-mono text-xs font-bold text-emerald-900 tabular-nums">
-                  {Math.round(lastFoundCandidate.confidence * 100)}% Confidence
-                </span>
-              </div>
-
-              <div>
-                <h4 className="text-lg font-bold font-display text-stone-900">
-                  {lastFoundCandidate.common_name}
-                </h4>
-                <div className="text-xs text-stone-600 italic">
-                  {lastFoundCandidate.species} · Genus: {lastFoundCandidate.genus}
-                </div>
-                <div className="text-xs text-stone-600 mt-1">
-                  Location: {lastFoundCandidate.location_label}
-                </div>
-              </div>
-
-              <div className="p-3 bg-white/80 rounded-xl border border-emerald-200/80 text-xs text-stone-700 leading-relaxed">
-                <span className="font-semibold text-stone-900">Agent Reasoning: </span>
-                {lastFoundCandidate.reasoning}
-              </div>
-
-              <div className="flex items-center gap-2 pt-1">
-                <button
-                  onClick={onGoToConfirm}
-                  className="w-full py-2.5 px-4 rounded-xl text-xs font-semibold bg-emerald-900 hover:bg-emerald-800 text-white shadow-xs transition-colors flex items-center justify-center gap-2"
-                >
-                  Review in Confirm Screen
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );

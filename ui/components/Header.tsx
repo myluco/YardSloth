@@ -40,9 +40,6 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="text-lg font-bold tracking-tight text-stone-900 font-display whitespace-nowrap block leading-tight">
                   Yard Sloth
                 </span>
-                <span className="text-[11px] text-stone-500 font-medium block">
-                  Python + CrewAI + MCP
-                </span>
               </div>
             </button>
 
@@ -139,14 +136,6 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <MapPin className="w-3.5 h-3.5 text-emerald-700" />
               <span>Location</span>
-            </button>
-
-            <button
-              onClick={onOpenStory}
-              className="hidden xl:inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-stone-700 hover:text-stone-950 bg-stone-100 hover:bg-stone-200/70 rounded-lg transition-colors whitespace-nowrap"
-            >
-              <BookOpen className="w-3.5 h-3.5 text-stone-500" />
-              Architecture
             </button>
 
             <button

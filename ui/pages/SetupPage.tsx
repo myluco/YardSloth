@@ -1,9 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   MapPin,
   Save,
   CheckCircle2,
-  Cpu,
   Globe,
   Navigation,
 } from 'lucide-react';
@@ -13,27 +12,83 @@ import { api } from '../shared/api';
 interface SetupPageProps {
   settings: Settings;
   onSaveSettings: (settings: Partial<Settings>) => Promise<void>;
+  onAgentCalibrated: (settings: Settings) => Promise<void>;
+}
+
+const agentFieldClass =
+  'w-full px-3 py-2 text-sm rounded-xl border border-stone-200 bg-stone-50 text-stone-800 cursor-default font-mono';
+
+function AgentReadOnlyField({
+  label,
+  value,
+  hint,
+  placeholder = 'Locate address to fill',
+  uppercase,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  placeholder?: string;
+  uppercase?: boolean;
+}) {
+  const display = value?.trim() ? value : '';
+  return (
+    <div>
+      <label className="block text-xs font-semibold text-stone-700 mb-1.5">{label}</label>
+      <div
+        className={`${agentFieldClass}${uppercase ? ' uppercase font-semibold' : ''}`}
+        aria-readonly="true"
+      >
+        {display || (
+          <span className="text-stone-400 font-sans not-italic normal-case font-normal">{placeholder}</span>
+        )}
+      </div>
+      {hint ? (
+        <span className="block text-[11px] text-stone-400 mt-1">{hint}</span>
+      ) : null}
+    </div>
+  );
 }
 
 export const SetupPage: React.FC<SetupPageProps> = ({
   settings,
   onSaveSettings,
+  onAgentCalibrated,
 }) => {
-  const [formData, setFormData] = useState<Settings>({ ...settings });
+  const [addressInput, setAddressInput] = useState(settings.address || settings.city || '');
+  const [calibrated, setCalibrated] = useState<Settings>({ ...settings });
   const [isSaving, setIsSaving] = useState(false);
   const [isLocating, setIsLocating] = useState(false);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [locateError, setLocateError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCalibrated({ ...settings });
+  }, [settings]);
+
+  const applyAgentSettings = (res: Settings) => {
+    setCalibrated(res);
+    const verified = res.formatted_address || res.address || res.city || '';
+    if (verified) setAddressInput(verified);
+  };
 
   const handleAddressSearch = async (addressQuery: string) => {
     if (!addressQuery.trim()) return;
     setIsLocating(true);
+    setLocateError(null);
     try {
       const res = await api.lookupLocation(addressQuery.trim());
-      setFormData(res);
+      applyAgentSettings(res);
+      await onAgentCalibrated(res);
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 3000);
     } catch (e) {
       console.error(e);
+      setLocateError(
+        e instanceof Error
+          ? e.message
+          : 'Could not resolve that address. Add city and state or try your ZIP code.'
+      );
     } finally {
       setIsLocating(false);
     }
@@ -45,24 +100,33 @@ export const SetupPage: React.FC<SetupPageProps> = ({
     navigator.geolocation.getCurrentPosition(
       async (pos) => {
         try {
+          setLocateError(null);
           const res = await api.lookupCoords(pos.coords.latitude, pos.coords.longitude);
-          setFormData(res);
+          applyAgentSettings(res);
+          await onAgentCalibrated(res);
           setSavedSuccess(true);
           setTimeout(() => setSavedSuccess(false), 3000);
+        } catch (e) {
+          console.error(e);
+          setLocateError('GPS lookup failed. Try entering your street address manually.');
         } finally {
           setIsLocating(false);
         }
       },
-      () => setIsLocating(false),
+      () => {
+        setIsLocating(false);
+        setLocateError('Location access denied or unavailable.');
+      },
       { timeout: 8000 }
     );
   };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!addressInput.trim()) return;
     setIsSaving(true);
     try {
-      await onSaveSettings(formData);
+      await onSaveSettings({ address: addressInput.trim() });
       setSavedSuccess(true);
       setTimeout(() => setSavedSuccess(false), 2500);
     } catch (err) {
@@ -84,10 +148,10 @@ export const SetupPage: React.FC<SetupPageProps> = ({
         />
         <div>
           <h1 className="text-2xl font-bold font-display text-stone-900 tracking-tight">
-            Climate & Python Agent Settings
+            Address Setup
           </h1>
           <p className="text-xs sm:text-sm text-stone-500 mt-1 leading-relaxed">
-            Changing your ZIP code dispatches the MCP tool to query online USDA climate zones and frost records live. Zero static data files are stored.
+            Enter your yard address or ZIP; agents resolve the verified location, USDA zone, frost dates, and coordinates live.
           </p>
         </div>
       </div>
@@ -98,7 +162,7 @@ export const SetupPage: React.FC<SetupPageProps> = ({
             <div className="flex items-center gap-2">
               <MapPin className="w-4 h-4 text-emerald-800" />
               <h2 className="text-base font-bold font-display text-stone-900">
-                1. Yard Address & Hardiness Calibration (MCP Live Geocoding)
+                1. Yard Address & Hardiness Calibration
               </h2>
             </div>
             <button
@@ -115,147 +179,77 @@ export const SetupPage: React.FC<SetupPageProps> = ({
           {/* Full Street Address / City Search Field */}
           <div className="space-y-1.5">
             <label className="block text-xs font-semibold text-stone-700">
-              Street Address, City, or Yard Location
+              Street Address, City, or ZIP Code
             </label>
             <div className="flex gap-2">
               <input
                 type="text"
-                value={formData.address || formData.city || ''}
-                onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                value={addressInput}
+                onChange={(e) => setAddressInput(e.target.value)}
                 placeholder="e.g. 742 Evergreen Terrace, Springfield, OR or 123 Elm St, Austin TX"
                 className="flex-1 px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700"
               />
               <button
                 type="button"
-                onClick={() => handleAddressSearch(formData.address || formData.city || '')}
-                disabled={isLocating || !(formData.address || formData.city)}
+                onClick={() => handleAddressSearch(addressInput)}
+                disabled={isLocating || !addressInput.trim()}
                 className="px-4 py-2 text-xs font-semibold text-white bg-stone-900 hover:bg-stone-800 disabled:opacity-50 rounded-xl transition-all shadow-2xs whitespace-nowrap"
               >
                 {isLocating ? 'Locating...' : 'Locate Address'}
               </button>
             </div>
             <span className="block text-[11px] text-stone-400">
-              Dispatches MCP web tool to resolve exact latitude, longitude, and USDA zone on the fly
+              Street addresses use OpenStreetMap (Nominatim); cities use Open-Meteo—then USDA zone from your ZIP.
             </span>
+            {locateError ? (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-xl px-3 py-2 mt-2">
+                {locateError}
+              </p>
+            ) : null}
           </div>
 
+          <p className="text-[11px] text-stone-500 pt-1">
+            Fields below are filled by the MCP geocoding agent after you locate an address or use GPS—they are not editable.
+          </p>
+
+          <AgentReadOnlyField
+            label="Verified yard location (agent)"
+            value={calibrated.formatted_address || calibrated.address || calibrated.city}
+            hint="Canonical address returned by the geocoding agent"
+          />
+
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-                Postal / ZIP Code
-              </label>
-              <input
-                type="text"
-                value={formData.zip}
-                onChange={(e) => setFormData({ ...formData, zip: e.target.value })}
-                placeholder="e.g. 97201"
-                className="w-full px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 font-mono"
-              />
-              <span className="block text-[11px] text-stone-400 mt-1">
-                Postcode for weather forecasts
-              </span>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-                USDA Hardiness Zone
-              </label>
-              <input
-                type="text"
-                value={formData.zone}
-                onChange={(e) => setFormData({ ...formData, zone: e.target.value })}
-                placeholder="e.g. 8b"
-                className="w-full px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 font-mono uppercase font-semibold"
-              />
-              <span className="block text-[11px] text-stone-400 mt-1">
-                {formData.temperature_range ? `PRISM / USDA (${formData.temperature_range}°F)` : 'Official PRISM / USDA Zone'}
-              </span>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-                Temperature Units
-              </label>
-              <div className="flex items-center gap-2 pt-0.5">
-                <button
-                  type="button"
-                  onClick={() => setFormData({ ...formData, units: 'F' })}
-                  className={`flex-1 py-2 text-xs font-semibold rounded-xl border transition-colors ${
-                    formData.units === 'F'
-                      ? 'bg-stone-900 text-stone-50 border-stone-900'
-                      : 'bg-stone-50 hover:bg-stone-100 border-stone-200 text-stone-700'
-                  }`}
-                >
-                  Fahrenheit (°F)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFormData({ ...formData, units: 'C' })}
-                  className={`flex-1 py-2 text-xs font-semibold rounded-xl border transition-colors ${
-                    formData.units === 'C'
-                      ? 'bg-stone-900 text-stone-50 border-stone-900'
-                      : 'bg-stone-50 hover:bg-stone-100 border-stone-200 text-stone-700'
-                  }`}
-                >
-                  Celsius (°C)
-                </button>
-              </div>
-            </div>
+            <AgentReadOnlyField
+              label="Postal / ZIP Code"
+              value={calibrated.zip}
+              hint="Postcode for weather forecasts"
+            />
+            <AgentReadOnlyField
+              label="USDA Hardiness Zone"
+              value={calibrated.zone}
+              hint={
+                calibrated.temperature_range
+                  ? `PRISM / USDA (${calibrated.temperature_range}°F)`
+                  : 'Official PRISM / USDA Zone'
+              }
+              uppercase
+            />
+            <AgentReadOnlyField
+              label="Temperature Units"
+              value={calibrated.units === 'C' ? 'Celsius (°C)' : calibrated.units === 'F' ? 'Fahrenheit (°F)' : ''}
+              hint="Derived with climate calibration"
+            />
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-                Average Last Spring Frost (MM-DD)
-              </label>
-              <input
-                type="text"
-                value={formData.last_frost}
-                onChange={(e) => setFormData({ ...formData, last_frost: e.target.value })}
-                placeholder="04-15"
-                className="w-full px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 font-mono"
-              />
-              <span className="block text-[11px] text-stone-400 mt-1">
-                Calculated on the fly
-              </span>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-stone-700 mb-1.5">
-                Average First Fall Frost (MM-DD)
-              </label>
-              <input
-                type="text"
-                value={formData.first_frost}
-                onChange={(e) => setFormData({ ...formData, first_frost: e.target.value })}
-                placeholder="10-25"
-                className="w-full px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700 font-mono"
-              />
-              <span className="block text-[11px] text-stone-400 mt-1">
-                Calculated on the fly
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Section 2: MCP Tooling & Architecture Guarantee */}
-        <div className="bg-white rounded-2xl p-6 border border-stone-200/80 shadow-2xs space-y-4">
-          <div className="flex items-center gap-2 pb-3 border-b border-stone-100">
-            <Globe className="w-4 h-4 text-emerald-800" />
-            <h2 className="text-base font-bold font-display text-stone-900">
-              2. MCP Web Browsing Tool & Architecture Status
-            </h2>
-          </div>
-
-          <div className="p-4 rounded-xl bg-stone-50 border border-stone-100 text-xs text-stone-700 space-y-2">
-            <div>
-              <span className="font-bold text-stone-900">Zero-Storage Architecture: </span>
-              The static files <code className="bg-stone-200 px-1 py-0.5 rounded font-mono">care_rules.json</code> and <code className="bg-stone-200 px-1 py-0.5 rounded font-mono">frost_dates.json</code> have been completely purged from the repository.
-            </div>
-            <div>
-              <span className="font-bold text-stone-900">Live Web Browsing: </span>
-              All botanical pruning knowledge and meteorological data are retrieved by agents using the Model Context Protocol tool (<code className="bg-stone-200 px-1 py-0.5 rounded font-mono">web_browser_tool.py</code>).
-            </div>
+            <AgentReadOnlyField
+              label="Average Last Spring Frost (MM-DD)"
+              value={calibrated.last_frost}
+            />
+            <AgentReadOnlyField
+              label="Average First Fall Frost (MM-DD)"
+              value={calibrated.first_frost}
+            />
           </div>
         </div>
 
@@ -263,7 +257,7 @@ export const SetupPage: React.FC<SetupPageProps> = ({
           {savedSuccess && (
             <div className="flex items-center gap-1.5 text-xs text-emerald-800 font-semibold">
               <CheckCircle2 className="w-4 h-4" />
-              Settings saved and Python calendar recalibrated!
+              Settings saved
             </div>
           )}
           {!savedSuccess && <div />}

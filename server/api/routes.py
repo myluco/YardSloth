@@ -9,28 +9,72 @@ import json
 from datetime import datetime
 from agents.main import pipeline
 from agents.memory.agent_memory import memory
+from agents.llm.ollama_client import OllamaError
+
+
+def _run_calendar():
+    try:
+        return pipeline.run_calendar(), None
+    except OllamaError as exc:
+        return None, str(exc)
+
 
 def handle_get_settings():
     return 200, memory.get_settings()
 
+
+def handle_get_ollama_status():
+    from agents.llm.ollama_client import check_ollama_status
+
+    status = check_ollama_status()
+    code = 200 if status.get("ok") else 503
+    return code, status
+
 def handle_post_settings(body: dict):
-    updated = memory.update_settings(body)
-    # If address or zip changed, query MCP for updated frost dates & coordinates
-    query = body.get("address") or body.get("zip")
+    if (
+        isinstance(body.get("location_labels"), list)
+        or isinstance(body.get("labels"), list)
+        or body.get("rename")
+        or body.get("yard_location_rename")
+    ):
+        return handle_update_yard_locations(body)
+
+    # Climate fields are agent-derived only; clients may not override zip/zone/frost directly.
+    allowed_without_geocode = {
+        "units",
+        "mock_frost_simulation",
+        "ollama_endpoint",
+        "ollama_model",
+        "last_location_label",
+        "yard_location_labels",
+    }
+    query = (body.get("address") or body.get("query") or "").strip() or None
+
     if query:
         geo = pipeline.mcp.call_tool("web_browse_geocode", {"query": query})
+        current = memory.get_settings()
+        resolved_address = (
+            geo.get("formatted_address") or geo.get("address") or body.get("address") or query
+        )
         memory.update_settings({
-            "city": geo.get("city", "Portland, Oregon"),
+            "address": resolved_address,
+            "formatted_address": resolved_address,
+            "city": geo.get("city", query),
             "lat": geo.get("lat", 45.52),
             "lon": geo.get("lon", -122.68),
             "zone": geo.get("zone", "8b"),
             "temperature_range": geo.get("temperature_range", "15 to 20"),
             "first_frost": geo.get("first_fall_frost", "11-15"),
             "last_frost": geo.get("last_spring_frost", "03-15"),
-            "zip": geo.get("zip", body.get("zip", ""))
+            "zip": geo.get("zip", ""),
+            "units": body.get("units", current.get("units", "F")),
         })
-    # Recalculate calendar
-    pipeline.run_calendar()
+    else:
+        patch = {k: body[k] for k in allowed_without_geocode if k in body}
+        if patch:
+            memory.update_settings(patch)
+
+    _run_calendar()
     return 200, memory.get_settings()
 
 def handle_lookup_location(body: dict):
@@ -41,8 +85,14 @@ def handle_lookup_location(body: dict):
     if lat is not None and lon is not None:
         # Reverse lookup and USDA zone resolution
         geo_result = pipeline.mcp.browser.geocode_address_or_zip(f"{lat},{lon}")
+        resolved_address = (
+            geo_result.get("formatted_address")
+            or geo_result.get("address")
+            or geo_result.get("city", f"GPS ({lat:.2f}, {lon:.2f})")
+        )
         memory.update_settings({
-            "address": geo_result.get("city", f"GPS ({lat:.2f}, {lon:.2f})"),
+            "address": resolved_address,
+            "formatted_address": resolved_address,
             "city": geo_result.get("city", f"GPS ({lat:.2f}, {lon:.2f})"),
             "lat": float(lat),
             "lon": float(lon),
@@ -54,8 +104,15 @@ def handle_lookup_location(body: dict):
         })
     elif query:
         geo = pipeline.mcp.call_tool("web_browse_geocode", {"query": query})
+        resolved_address = geo.get("formatted_address") or geo.get("address") or query
+        if geo.get("geocode_confidence") == "low":
+            return 422, {
+                "error": "Could not resolve that address. Try adding city and state, or use a ZIP code.",
+                "query": query,
+            }
         new_settings = {
-            "address": query,
+            "address": resolved_address,
+            "formatted_address": resolved_address,
             "city": geo.get("city", query),
             "lat": geo.get("lat", 45.52),
             "lon": geo.get("lon", -122.68),
@@ -67,7 +124,7 @@ def handle_lookup_location(body: dict):
         }
         memory.update_settings(new_settings)
 
-    pipeline.run_calendar()
+    _run_calendar()
     return 200, memory.get_settings()
 
 def handle_get_plants():
@@ -81,9 +138,89 @@ def handle_post_confirm_plant(body: dict):
     edited_data = body.get("editedData", {})
     plant = memory.confirm_candidate(candidate_id, edited_data)
     if plant:
-        tasks = pipeline.run_calendar()
+        memory.remember_yard_location_label(plant.get("location_label", ""))
+        memory.persist()
+        tasks, err = _run_calendar()
+        if err:
+            return 503, {"error": err, "plant": plant, "success": False}
         return 200, {"success": True, "plant": plant, "tasksCount": len(tasks)}
     return 400, {"error": "Candidate not found"}
+
+
+def handle_update_yard_locations(body: dict):
+    rename = body.get("rename") or body.get("yard_location_rename") or {}
+    if rename and not isinstance(rename, dict):
+        return 400, {"error": "rename must be an object mapping old labels to new labels."}
+    if rename:
+        memory.apply_yard_location_renames(rename)
+
+    plant_id = body.get("plant_id")
+    location_labels = body.get("location_labels")
+    location_label = (body.get("location_label") or "").strip()
+
+    if plant_id:
+        if location_labels is not None:
+            if not isinstance(location_labels, list) or not location_labels:
+                return 400, {"error": "location_labels must be a non-empty array."}
+            clean_labels = []
+            seen = set()
+            for item in location_labels:
+                lab = " ".join(str(item).split())
+                if lab and lab not in seen:
+                    seen.add(lab)
+                    clean_labels.append(lab)
+            if not clean_labels:
+                return 400, {"error": "Select at least one yard location for this plant."}
+            plant = memory.update_plant(
+                plant_id,
+                {"location_labels": clean_labels, "location_label": clean_labels[0]},
+            )
+        elif location_label:
+            plant = memory.update_plant(
+                plant_id,
+                {"location_labels": [location_label], "location_label": location_label},
+            )
+        else:
+            return 400, {"error": "location_labels or location_label is required when plant_id is set."}
+        if not plant:
+            return 404, {"error": "Plant not found"}
+    elif location_label:
+        memory.remember_yard_location_label(location_label)
+        memory.rebuild_yard_location_labels_from_plants()
+        memory.persist()
+
+    tasks, err = _run_calendar()
+    payload = {
+        "success": True,
+        "settings": memory.get_settings(),
+        "plants": memory.get_plants(),
+        "candidates": memory.get_candidates(),
+        "tasks": tasks or memory.get_tasks(),
+    }
+    if err:
+        return 503, {**payload, "error": err}
+    return 200, payload
+
+
+def handle_update_plant(plant_id: str, body: dict):
+    allowed = {"location_label", "location_labels", "common_name", "species", "notes"}
+    updates = {k: body[k] for k in allowed if k in body}
+    if not updates:
+        return 400, {"error": "No valid plant fields to update."}
+    plant = memory.update_plant(plant_id, updates)
+    if not plant:
+        return 404, {"error": "Plant not found"}
+    tasks, err = _run_calendar()
+    if err:
+        return 503, {"error": err, "plant": plant, "success": False}
+    return 200, {"success": True, "plant": plant, "tasks": tasks}
+
+
+def handle_post_update_plant(body: dict):
+    plant_id = body.get("plant_id")
+    if not plant_id:
+        return 400, {"error": "plant_id is required."}
+    return handle_update_plant(str(plant_id), body)
 
 def handle_delete_candidate(cand_id: str):
     memory.remove_candidate(cand_id)
@@ -91,24 +228,37 @@ def handle_delete_candidate(cand_id: str):
 
 def handle_delete_plant(plant_id: str):
     memory.delete_plant(plant_id)
-    pipeline.run_calendar()
+    _run_calendar()
     return 200, {"success": True}
 
 def handle_identify_plant(body: dict):
     location_label = body.get("location_label", "Front bed")
-    sample_species = body.get("sample_species")
+    sample_species = (body.get("sample_species") or body.get("plant_name") or "").strip() or None
     image_base64 = body.get("image_base64")
-    candidate = pipeline.run_census(location_label, sample_species, image_base64)
-    return 200, {"candidate": candidate}
+    if not sample_species:
+        return 400, {"error": "Plant name is required (common or scientific name)."}
+    try:
+        candidate = pipeline.run_census(location_label, sample_species, image_base64)
+        memory.remember_yard_location_label(location_label)
+        memory.persist()
+    except OllamaError as e:
+        return 503, {"error": str(e)}
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    return 200, {"candidate": candidate, "settings": memory.get_settings()}
 
 def handle_get_tasks():
     tasks = memory.get_tasks()
     if not tasks:
-        tasks = pipeline.run_calendar()
+        tasks, err = _run_calendar()
+        if err:
+            return 503, {"error": err, "tasks": []}
     return 200, {"tasks": tasks}
 
 def handle_generate_tasks():
-    tasks = pipeline.run_calendar()
+    tasks, err = _run_calendar()
+    if err:
+        return 503, {"error": err, "success": False, "tasks": []}
     return 200, {"success": True, "tasks": tasks}
 
 def handle_toggle_task(task_id: str):
@@ -121,6 +271,10 @@ def handle_get_forecast():
     status = pipeline.run_frost_watch()
     return 200, status
 
+
+def handle_post_evening_checklist():
+    return 200, pipeline.run_evening_checklist()
+
 def handle_toggle_simulation():
     settings = memory.get_settings()
     new_val = not settings.get("mock_frost_simulation", True)
@@ -130,7 +284,9 @@ def handle_toggle_simulation():
 def handle_export_ics():
     tasks = memory.get_tasks()
     if not tasks:
-        tasks = pipeline.run_calendar()
+        tasks, err = _run_calendar()
+        if err:
+            return 503, json.dumps({"error": err}), "application/json"
 
     lines = [
         "BEGIN:VCALENDAR",

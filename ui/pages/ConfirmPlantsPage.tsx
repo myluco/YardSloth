@@ -1,27 +1,56 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Check,
   X,
   Edit3,
   Trash2,
 } from 'lucide-react';
-import { PlantCandidate } from '../shared/types';
+import { PlantCandidate, Settings } from '../shared/types';
+import {
+  collectInUseLocationLabels,
+  formatPlantLocations,
+  getPlantLocationLabels,
+  normalizeLocationLabel,
+} from '../shared/yardLocations';
+
+function labelFromSnake(value?: string, fallback = 'Unknown'): string {
+  if (!value) return fallback;
+  return value.replace(/_/g, ' ');
+}
+
+function confidencePercent(confidence?: number): number {
+  if (typeof confidence !== 'number' || Number.isNaN(confidence)) return 0;
+  return Math.round(confidence * 100);
+}
 
 interface ConfirmPlantsPageProps {
+  settings: Settings;
   candidates: PlantCandidate[];
   plants: PlantCandidate[];
   onConfirm: (candidateId: string, editedData: Partial<PlantCandidate>) => void;
   onSkip: (candidateId: string) => void;
   onDeletePlant: (plantId: string) => void;
+  onUpdatePlant: (
+    plantId: string,
+    updates: Partial<Pick<PlantCandidate, 'location_label' | 'common_name' | 'species' | 'notes'>>
+  ) => Promise<void>;
+  onYardLocationsSave: (payload: {
+    rename?: Record<string, string>;
+    plant_id?: string;
+    location_labels?: string[];
+  }) => Promise<void>;
   onWalkYard: () => void;
 }
 
 export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
+  settings,
   candidates,
   plants,
   onConfirm,
   onSkip,
   onDeletePlant,
+  onUpdatePlant,
+  onYardLocationsSave,
   onWalkYard,
 }) => {
   const [editingCandidate, setEditingCandidate] = useState<PlantCandidate | null>(null);
@@ -32,6 +61,72 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
   });
 
   const [categoryFilter, setCategoryFilter] = useState<string>('all');
+  const [editingPlantId, setEditingPlantId] = useState<string | null>(null);
+  const [selectedPlantLocations, setSelectedPlantLocations] = useState<string[]>([]);
+  const [newLocationInput, setNewLocationInput] = useState('');
+  const [locationSaveError, setLocationSaveError] = useState<string | null>(null);
+  const [isSavingLocations, setIsSavingLocations] = useState(false);
+
+  const locationLabelPool = useMemo(() => {
+    const pool = new Set(collectInUseLocationLabels(plants, candidates));
+    for (const label of selectedPlantLocations) {
+      pool.add(label);
+    }
+    return Array.from(pool);
+  }, [plants, candidates, selectedPlantLocations]);
+
+  const openLocationEditor = (plantId: string) => {
+    const plant = plants.find((p) => p.id === plantId);
+    setSelectedPlantLocations(plant ? getPlantLocationLabels(plant) : []);
+    setNewLocationInput('');
+    setLocationSaveError(null);
+    setEditingPlantId(plantId);
+  };
+
+  const togglePlantLocation = (label: string) => {
+    setSelectedPlantLocations((prev) =>
+      prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
+    );
+  };
+
+  const addNewLocationForPlant = () => {
+    const clean = normalizeLocationLabel(newLocationInput);
+    if (!clean) {
+      setLocationSaveError('Enter a location label to add.');
+      return;
+    }
+    setLocationSaveError(null);
+    setSelectedPlantLocations((prev) => (prev.includes(clean) ? prev : [...prev, clean]));
+    setNewLocationInput('');
+  };
+
+  const saveLocationEditor = async () => {
+    if (!editingPlantId) return;
+    const labels = Array.from(
+      new Set(selectedPlantLocations.map((l) => normalizeLocationLabel(l)).filter(Boolean))
+    );
+    if (labels.length < 1) {
+      setLocationSaveError('Select or add at least one location for this plant.');
+      return;
+    }
+    setIsSavingLocations(true);
+    setLocationSaveError(null);
+    try {
+      await onYardLocationsSave({
+        plant_id: editingPlantId,
+        location_labels: labels,
+      });
+      setEditingPlantId(null);
+    } catch (err) {
+      setLocationSaveError(err instanceof Error ? err.message : 'Could not save locations.');
+    } finally {
+      setIsSavingLocations(false);
+    }
+  };
+
+  const editingPlant = editingPlantId
+    ? plants.find((p) => p.id === editingPlantId)
+    : undefined;
 
   const startEdit = (candidate: PlantCandidate) => {
     setEditingCandidate(candidate);
@@ -74,7 +169,7 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
               )}
             </div>
             <p className="text-xs sm:text-sm text-stone-500 mt-1">
-              Human-in-the-loop review. The model makes its best botanical guess, and you confirm or adjust.
+              Plants from Yard Walk land here first. Confirm one to move it into your yard list below.
             </p>
           </div>
 
@@ -99,7 +194,7 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {candidates.map((cand) => {
-              const confidencePercent = Math.round(cand.confidence * 100);
+              const pct = confidencePercent(cand.confidence);
               return (
                 <div
                   key={cand.id}
@@ -121,7 +216,7 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
 
                       <div className="text-right shrink-0">
                         <div className="text-xs font-mono font-bold tabular-nums text-stone-900">
-                          {confidencePercent}%
+                          {pct}%
                         </div>
                         <span className="text-[10px] text-stone-400 uppercase tracking-wider block">
                           Confidence
@@ -132,13 +227,13 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                     <div className="w-full bg-stone-100 rounded-full h-1.5 overflow-hidden">
                       <div
                         className={`h-full rounded-full ${
-                          confidencePercent >= 90
+                          pct >= 90
                             ? 'bg-emerald-600'
-                            : confidencePercent >= 75
+                            : pct >= 75
                             ? 'bg-amber-500'
                             : 'bg-stone-400'
                         }`}
-                        style={{ width: `${confidencePercent}%` }}
+                        style={{ width: `${pct}%` }}
                       />
                     </div>
 
@@ -148,7 +243,7 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                           Bloom Wood
                         </span>
                         <span className="font-semibold text-stone-800 capitalize">
-                          {cand.bloom_wood.replace('_', ' ')}
+                          {labelFromSnake(cand.bloom_wood)}
                         </span>
                       </div>
                       <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-100">
@@ -156,14 +251,21 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                           Frost Threshold
                         </span>
                         <span className="font-semibold text-stone-800 font-mono tabular-nums">
-                          ≤ {cand.frost_threshold_f}°F ({cand.frost_sensitivity})
+                          ≤ {cand.frost_threshold_f ?? '—'}°F ({cand.frost_sensitivity ?? 'unknown'})
                         </span>
                       </div>
                     </div>
 
-                    <div className="p-3 bg-stone-50/70 rounded-xl border border-stone-100 text-xs text-stone-600 leading-relaxed">
-                      <span className="font-medium text-stone-900">Agent Reasoning: </span>
-                      {cand.reasoning}
+                    <div className="p-3 bg-stone-50/70 rounded-xl border border-stone-100 text-xs text-stone-600 leading-relaxed space-y-2">
+                      <div>
+                        <span className="font-medium text-stone-900">Agent reasoning: </span>
+                        {cand.reasoning}
+                      </div>
+                      {cand.source ? (
+                        <div className="font-mono text-[10px] text-emerald-900 bg-emerald-50 border border-emerald-100 rounded-lg px-2 py-1">
+                          Profile source: {cand.source}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
 
@@ -251,19 +353,19 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                     </div>
                   </div>
                   <span className="text-[11px] font-medium text-stone-500 bg-stone-100 px-2 py-0.5 rounded capitalize">
-                    {plant.care_category.replace('_', ' ')}
+                    {labelFromSnake(plant.care_category, 'plant')}
                   </span>
                 </div>
 
                 <div className="text-xs text-stone-600 font-medium mt-2">
-                  📍 {plant.location_label}
+                  📍 {formatPlantLocations(plant)}
                 </div>
 
                 <div className="mt-3 text-xs text-stone-600 space-y-1.5">
                   <div className="flex items-center justify-between">
                     <span className="text-stone-400">Pruning Wood:</span>
                     <span className="font-medium text-stone-800 capitalize">
-                      {plant.bloom_wood.replace('_', ' ')}
+                      {labelFromSnake(plant.bloom_wood)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
@@ -281,22 +383,120 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                 )}
               </div>
 
-              <div className="mt-4 pt-3 border-t border-stone-100 flex items-center justify-between">
+              <div className="mt-4 pt-3 border-t border-stone-100 flex items-center justify-between gap-2">
                 <span className="text-[11px] text-stone-400 font-mono">
                   ID: {plant.id}
                 </span>
-                <button
-                  onClick={() => onDeletePlant(plant.id)}
-                  className="text-xs text-stone-400 hover:text-red-700 p-1.5 rounded transition-colors"
-                  title="Remove plant and its calendar tasks"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => openLocationEditor(plant.id)}
+                    className="text-xs text-stone-600 hover:text-stone-900 px-2 py-1 rounded-lg border border-stone-200"
+                  >
+                    Edit location
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onDeletePlant(plant.id)}
+                    className="text-xs text-stone-400 hover:text-red-700 p-1.5 rounded transition-colors"
+                    title="Remove plant and its calendar tasks"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           ))}
         </div>
       </div>
+
+      {editingPlantId && (
+        <div className="fixed inset-0 z-50 bg-stone-900/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-stone-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-bold font-display text-stone-900">
+              Locations for this plant
+            </h3>
+            <p className="text-xs text-stone-500 leading-relaxed">
+              {editingPlant?.common_name
+                ? `Choose every spot where “${editingPlant.common_name}” appears in your yard. You can select multiple labels.`
+                : 'Choose every spot where this plant appears in your yard.'}
+              {' '}Only labels already used on your plants are listed below.
+            </p>
+
+            <div className="space-y-2">
+              <div className="text-[11px] font-semibold text-stone-600 uppercase tracking-wide">
+                Used in your yard
+              </div>
+              {locationLabelPool.length === 0 ? (
+                <p className="text-xs text-stone-500">No locations yet — add one below.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {locationLabelPool.map((label) => (
+                    <li key={label}>
+                      <label className="flex items-start gap-3 p-3 rounded-xl border border-stone-200 hover:border-stone-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={selectedPlantLocations.includes(label)}
+                          onChange={() => togglePlantLocation(label)}
+                          className="mt-0.5 text-emerald-800 focus:ring-emerald-700"
+                        />
+                        <span className="text-sm text-stone-800">{label}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="space-y-2 pt-2 border-t border-stone-100">
+              <div className="text-[11px] font-semibold text-stone-600 uppercase tracking-wide">
+                Add a new location label
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newLocationInput}
+                  onChange={(e) => setNewLocationInput(e.target.value)}
+                  placeholder="Frontyard"
+                  className="flex-1 px-3 py-2 text-sm rounded-xl border border-stone-300 focus:outline-none focus:ring-2 focus:ring-emerald-700/20 focus:border-emerald-700"
+                />
+                <button
+                  type="button"
+                  onClick={addNewLocationForPlant}
+                  className="px-3 py-2 text-xs font-semibold rounded-xl border border-stone-300 hover:bg-stone-50"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+
+            {locationSaveError && (
+              <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                {locationSaveError}
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-stone-100">
+              <button
+                type="button"
+                onClick={() => setEditingPlantId(null)}
+                className="px-4 py-2 text-xs font-medium text-stone-600 hover:text-stone-900"
+                disabled={isSavingLocations}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveLocationEditor()}
+                disabled={isSavingLocations}
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-700 rounded-xl transition-colors disabled:opacity-60"
+              >
+                {isSavingLocations ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Modal */}
       {editingCandidate && (

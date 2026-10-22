@@ -26,13 +26,28 @@ class PlantCensusAgent:
         2. Calls MCP Web Browser to retrieve live botanical profile
         3. Constructs structured PlantCandidate
         """
-        query_name = sample_species or "Bigleaf Hydrangea"
+        query_name = (sample_species or "").strip()
+        if not query_name:
+            raise ValueError("Plant name is required (common or scientific name).")
 
-        # Call MCP Web Browser Tool to retrieve care information on the fly
         knowledge = self.mcp.call_tool("web_browse_plant_care", {
             "plant_name": query_name,
             "species": sample_species
         })
+        if knowledge.get("status") == "error":
+            raise ValueError(knowledge.get("message", "Plant care lookup failed"))
+
+        has_photo = bool(image_base64 and str(image_base64).strip())
+        llm_reason = knowledge.get("reasoning_summary") or knowledge.get("source", "Ollama")
+        if has_photo:
+            reasoning = (
+                f"User supplied “{query_name}” with a yard photo at {location_label or 'Yard walk find'}. "
+                f"{llm_reason}"
+            )
+            confidence = 0.91
+        else:
+            reasoning = f"User supplied plant name “{query_name}”. {llm_reason}"
+            confidence = 0.88
 
         candidate = {
             "id": f"cand-{int(time.time() * 1000)}",
@@ -40,8 +55,9 @@ class PlantCensusAgent:
             "species": knowledge.get("species", f"{query_name.title()} spp."),
             "genus": knowledge.get("species", query_name).split(" ")[0],
             "location_label": location_label or "Yard walk find",
-            "confidence": 0.94,
-            "reasoning": f"Identified via visual morphology. MCP web browse verified {knowledge.get('bloom_wood', 'standard')} bloom wood and cold threshold.",
+            "location_labels": [location_label or "Yard walk find"],
+            "confidence": confidence,
+            "reasoning": reasoning,
             "bloom_wood": knowledge.get("bloom_wood", "new_wood"),
             "frost_sensitivity": knowledge.get("frost_sensitivity", "semi_hardy"),
             "frost_threshold_f": knowledge.get("frost_threshold_f", 32),
@@ -49,6 +65,19 @@ class PlantCensusAgent:
             "confirmed": False,
             "source": knowledge.get("source", "mcp_browser")
         }
+        if has_photo:
+            candidate["photo_url"] = image_base64
+
+        for field in (
+            "prune_window",
+            "prune_rules",
+            "fertilize_window",
+            "fertilize_type",
+            "mulch_rules",
+            "reasoning_summary",
+        ):
+            if knowledge.get(field):
+                candidate[field] = knowledge[field]
 
         memory.add_candidate(candidate)
         return candidate

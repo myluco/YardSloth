@@ -103,8 +103,51 @@ export default function App() {
     }
   };
 
-  const handleCandidateAdded = (newCandidate: PlantCandidate) => {
-    setCandidates((prev) => [newCandidate, ...prev]);
+  const handleCandidateAdded = async (
+    newCandidate: PlantCandidate,
+    updatedSettings?: Settings
+  ) => {
+    if (updatedSettings) {
+      setSettings(updatedSettings);
+    }
+    try {
+      const plantsData = await api.getPlants();
+      setPlants(plantsData.plants);
+      setCandidates(plantsData.candidates);
+    } catch {
+      setCandidates((prev) => [
+        newCandidate,
+        ...prev.filter((c) => c.id !== newCandidate.id),
+      ]);
+    }
+    setCurrentTab('confirm');
+  };
+
+  const handleUpdatePlant = async (
+    plantId: string,
+    updates: Partial<
+      Pick<PlantCandidate, 'location_label' | 'location_labels' | 'common_name' | 'species' | 'notes'>
+    >
+  ) => {
+    const res = await api.updatePlant(plantId, updates);
+    setPlants((prev) => prev.map((p) => (p.id === plantId ? res.plant : p)));
+    setTasks(res.tasks);
+    if (updates.location_label || updates.location_labels) {
+      const settingsData = await api.getSettings();
+      setSettings(settingsData);
+    }
+  };
+
+  const handleYardLocationsSave = async (payload: {
+    rename?: Record<string, string>;
+    plant_id?: string;
+    location_labels?: string[];
+  }) => {
+    const res = await api.updateYardLocations(payload);
+    if (res.settings) setSettings(res.settings);
+    setPlants((prev) => res.plants ?? prev);
+    setCandidates((prev) => res.candidates ?? prev);
+    setTasks((prev) => res.tasks ?? prev);
   };
 
   const handleConfirmPlant = async (candidateId: string, editedData: Partial<PlantCandidate>) => {
@@ -164,20 +207,30 @@ export default function App() {
     }
   };
 
+  const refreshAfterSettingsChange = async () => {
+    const [updatedTasks, forecastData] = await Promise.all([
+      api.getTasks(),
+      api.getForecast(),
+    ]);
+    setTasks(updatedTasks.tasks);
+    setForecast(forecastData.forecast);
+    setAlert(forecastData.alert);
+  };
+
   const handleSaveSettings = async (newSettings: Partial<Settings>) => {
     try {
       const updated = await api.updateSettings(newSettings);
       setSettings(updated);
-      const [updatedTasks, forecastData] = await Promise.all([
-        api.getTasks(),
-        api.getForecast(),
-      ]);
-      setTasks(updatedTasks.tasks);
-      setForecast(forecastData.forecast);
-      setAlert(forecastData.alert);
+      await refreshAfterSettingsChange();
     } catch (err) {
       console.error(err);
+      throw err;
     }
+  };
+
+  const handleAgentCalibrated = async (updated: Settings) => {
+    setSettings(updated);
+    await refreshAfterSettingsChange();
   };
 
   const handleUpdateLocation = async (query: string) => {
@@ -228,9 +281,6 @@ export default function App() {
         <h2 className="text-xl font-bold font-display text-stone-900">
           Waking Yard Sloth...
         </h2>
-        <p className="text-xs text-stone-500 mt-1">
-          Python server & MCP web browsing agents initializing
-        </p>
       </div>
     );
   }
@@ -240,7 +290,7 @@ export default function App() {
       <Header
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
-        candidateCount={candidates.length}
+        candidateCount={candidates?.length ?? 0}
         alert={alert}
         settings={settings}
         onOpenStory={() => setIsStoryModalOpen(true)}
@@ -272,17 +322,17 @@ export default function App() {
             forecast={forecast}
             alert={alert}
             plants={plants}
-            simulationActive={simulationActive}
             settings={settings}
             onUpdateLocation={handleUpdateLocation}
             onUseGPS={handleUseGPS}
-            onToggleSimulation={handleToggleSimulation}
             onRefresh={handleRefreshForecast}
           />
         )}
 
         {currentTab === 'walk' && (
           <YardWalkPage
+            settings={settings}
+            plants={plants}
             onCandidateAdded={handleCandidateAdded}
             onGoToConfirm={() => setCurrentTab('confirm')}
           />
@@ -290,11 +340,14 @@ export default function App() {
 
         {currentTab === 'confirm' && (
           <ConfirmPlantsPage
+            settings={settings}
             candidates={candidates}
             plants={plants}
             onConfirm={handleConfirmPlant}
             onSkip={handleSkipCandidate}
             onDeletePlant={handleDeletePlant}
+            onUpdatePlant={handleUpdatePlant}
+            onYardLocationsSave={handleYardLocationsSave}
             onWalkYard={() => setCurrentTab('walk')}
           />
         )}
@@ -312,6 +365,7 @@ export default function App() {
           <SetupPage
             settings={settings}
             onSaveSettings={handleSaveSettings}
+            onAgentCalibrated={handleAgentCalibrated}
           />
         )}
       </main>
@@ -397,16 +451,9 @@ export default function App() {
           <div className="flex items-center gap-2">
             <span className="font-bold text-stone-800 font-display">Yard Sloth</span>
             <span>·</span>
-            <span>Pure Python Backend + CrewAI + MCP Live Browsing</span>
           </div>
 
           <div className="flex items-center gap-4 text-[11px] text-stone-400">
-            <button
-              onClick={() => setIsStoryModalOpen(true)}
-              className="hover:text-stone-700 underline transition-colors"
-            >
-              Python Server & MCP Architecture
-            </button>
             <span>·</span>
             <span>Weather by Open-Meteo</span>
           </div>

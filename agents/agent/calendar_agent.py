@@ -9,11 +9,44 @@ then applies deterministic scheduling arithmetic to prevent week overloading.
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from agents.mcp.mcp_client import mcp_client
-from agents.memory.agent_memory import memory
+from agents.memory.agent_memory import memory, plant_location_labels
 
 class CareCalendarAgent:
     def __init__(self):
         self.mcp = mcp_client
+
+    def _task_title(self, plant: Dict[str, Any], action: str) -> str:
+        name = plant.get("common_name", "Plant")
+        locs = plant_location_labels(plant)
+        loc = " · ".join(locs)
+        return f"{action} {name} @ {loc}" if loc else f"{action} {name}"
+
+    def _care_knowledge_for_plant(self, plant: Dict[str, Any]) -> Dict[str, Any]:
+        cached = memory.get_cached_plant_profile(
+            plant.get("common_name", ""),
+            plant.get("species"),
+        )
+        if cached:
+            return cached
+
+        if plant.get("bloom_wood") and plant.get("prune_rules"):
+            return {
+                "bloom_wood": plant.get("bloom_wood"),
+                "prune_rules": plant.get("prune_rules", ""),
+                "prune_window": plant.get("prune_window", ""),
+                "fertilize_window": plant.get("fertilize_window", ""),
+                "fertilize_type": plant.get("fertilize_type", ""),
+                "mulch_rules": plant.get("mulch_rules", ""),
+                "source": "plant_record",
+            }
+
+        return self.mcp.call_tool(
+            "web_browse_plant_care",
+            {
+                "plant_name": plant["common_name"],
+                "species": plant["species"],
+            },
+        )
 
     def generate_calendar(self) -> List[Dict[str, Any]]:
         """
@@ -45,12 +78,7 @@ class CareCalendarAgent:
         task_id = 1
 
         for plant in plants:
-            # Query MCP tool on the fly (NO static JSON file)
-            knowledge = self.mcp.call_tool("web_browse_plant_care", {
-                "plant_name": plant["common_name"],
-                "species": plant["species"]
-            })
-
+            knowledge = self._care_knowledge_for_plant(plant)
             bloom_wood = knowledge.get("bloom_wood", plant.get("bloom_wood", "new_wood"))
 
             # 1. Pruning chore
@@ -63,7 +91,8 @@ class CareCalendarAgent:
                     "plant_name": plant["common_name"],
                     "plant_species": plant["species"],
                     "type": "prune",
-                    "title": f"Post-Bloom Prune {plant['common_name']}",
+                    "title": self._task_title(plant, "Post-Bloom Prune"),
+                    "location_label": plant.get("location_label", ""),
                     "due_date": prune_dt.strftime("%Y-%m-%d"),
                     "why": "CRITICAL: Blooms on OLD WOOD. Summer pruning allows plant to set next year's flower buds. Late winter pruning destroys all blooms.",
                     "how": knowledge.get("prune_rules", "Cut spent flower heads down to the first pair of healthy plump buds."),
@@ -80,7 +109,8 @@ class CareCalendarAgent:
                     "plant_name": plant["common_name"],
                     "plant_species": plant["species"],
                     "type": "prune",
-                    "title": f"Early Spring Hard Prune {plant['common_name']}",
+                    "title": self._task_title(plant, "Early Spring Hard Prune"),
+                    "location_label": plant.get("location_label", ""),
                     "due_date": prune_dt.strftime("%Y-%m-%d"),
                     "why": "Blooms on NEW WOOD. Heavy dormant pruning encourages vigorous new flowering canes for summer.",
                     "how": knowledge.get("prune_rules", "Cut canes back by one-third at a 45-degree angle just above outward-facing bud."),
@@ -96,7 +126,8 @@ class CareCalendarAgent:
                     "plant_name": plant["common_name"],
                     "plant_species": plant["species"],
                     "type": "prune",
-                    "title": f"Pinch Suckers on {plant['common_name']}",
+                    "title": self._task_title(plant, "Pinch Suckers on"),
+                    "location_label": plant.get("location_label", ""),
                     "due_date": prune_dt.strftime("%Y-%m-%d"),
                     "why": "Channel vegetative energy into fruit trusses and remove low leaves touching soil.",
                     "how": knowledge.get("prune_rules", "Snap off 2-inch suckers growing in leaf axils with your fingers."),
@@ -113,7 +144,8 @@ class CareCalendarAgent:
                 "plant_name": plant["common_name"],
                 "plant_species": plant["species"],
                 "type": "fertilize",
-                "title": f"Spring Feeding for {plant['common_name']}",
+                "title": self._task_title(plant, "Spring Feeding for"),
+                "location_label": plant.get("location_label", ""),
                 "due_date": fert_dt.strftime("%Y-%m-%d"),
                 "why": "Support spring root flush and emerging vegetative buds.",
                 "how": knowledge.get("fertilize_type", "Top-dress with balanced organic compost or slow-release granules."),
@@ -130,7 +162,8 @@ class CareCalendarAgent:
                 "plant_name": plant["common_name"],
                 "plant_species": plant["species"],
                 "type": "mulch",
-                "title": f"Winter Mulch & Root Protection for {plant['common_name']}",
+                "title": self._task_title(plant, "Winter Mulch & Root Protection for"),
+                "location_label": plant.get("location_label", ""),
                 "due_date": mulch_dt.strftime("%Y-%m-%d"),
                 "why": "Prevents frost heave from ground freezing and preserves soil moisture during winter winds.",
                 "how": knowledge.get("mulch_rules", "Apply 2-3 inches of coarse bark mulch. Keep clear of the main trunk."),

@@ -24,8 +24,10 @@ class MCPClient:
             return self.browser.geocode_address_or_zip(query)
 
         elif tool_name == "web_browse_plant_care":
-            plant_name = arguments.get("plant_name", "Hydrangea")
+            plant_name = arguments.get("plant_name", "")
             species = arguments.get("species")
+            if not str(plant_name).strip():
+                return {"status": "error", "message": "plant_name is required for Ollama lookup"}
             return self.browser.browse_plant_care_knowledge(plant_name, species)
 
         else:

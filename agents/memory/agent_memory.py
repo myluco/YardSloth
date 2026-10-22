@@ -1,127 +1,146 @@
 """
 agents/memory/agent_memory.py
 
-Zero-disk ephemeral in-memory storage for CrewAI agents.
-Stores plant candidates, confirmed specimens, task schedule, and forecast session state.
-No data is ever written to disk files.
+In-memory garden state with JSON persistence across restarts.
 """
 
+from copy import deepcopy
 from typing import Dict, List, Any, Optional
+
+from agents.memory.persistence import (
+    default_state_path,
+    load_state,
+    normalize_plant_cache_key,
+    save_state,
+)
+
+def _normalize_location_label(label: str) -> str:
+    return " ".join((label or "").split())
+
+
+def plant_location_labels(plant: Dict[str, Any]) -> List[str]:
+    multi = plant.get("location_labels")
+    if isinstance(multi, list) and multi:
+        out: List[str] = []
+        seen: set = set()
+        for item in multi:
+            clean = _normalize_location_label(str(item))
+            if clean and clean not in seen:
+                seen.add(clean)
+                out.append(clean)
+        if out:
+            return out
+    single = _normalize_location_label(plant.get("location_label") or "")
+    return [single] if single else []
+
+
+def sync_plant_location_fields(plant: Dict[str, Any]) -> None:
+    labels = plant_location_labels(plant)
+    plant["location_labels"] = labels
+    plant["location_label"] = labels[0] if labels else (plant.get("location_label") or "")
+
+
+DEFAULT_SETTINGS: Dict[str, Any] = {
+    "address": "Portland, OR",
+    "zip": "97201",
+    "city": "Portland, Oregon",
+    "lat": 45.52,
+    "lon": -122.68,
+    "zone": "8b",
+    "temperature_range": "15 to 20",
+    "first_frost": "11-15",
+    "last_frost": "03-15",
+    "units": "F",
+    "mock_frost_simulation": False,
+    "ollama_endpoint": "http://localhost:11434",
+    "ollama_model": "gemma4:31b-cloud",
+    "last_location_label": "Front bed, left of steps",
+    "yard_location_labels": [
+        "Front bed, left of steps",
+        "Cedar raised box #1",
+        "South deck containers",
+        "Walkway trellised arbor",
+        "East fence shade border",
+    ],
+}
+
 
 class AgentMemory:
     def __init__(self):
-        # In-memory transient state
         self._plants: List[Dict[str, Any]] = []
         self._candidates: List[Dict[str, Any]] = []
         self._tasks: List[Dict[str, Any]] = []
         self._forecast_cache: Optional[Dict[str, Any]] = None
-        self._settings: Dict[str, Any] = {
-            "address": "Portland, OR",
-            "zip": "97201",
-            "city": "Portland, Oregon",
-            "lat": 45.52,
-            "lon": -122.68,
-            "zone": "8b",
-            "temperature_range": "15 to 20",
-            "first_frost": "11-15",
-            "last_frost": "03-15",
-            "units": "F",
-            "mock_frost_simulation": False
+        self._settings: Dict[str, Any] = deepcopy(DEFAULT_SETTINGS)
+        self._plant_knowledge_cache: Dict[str, Dict[str, Any]] = {}
+        self._state_path = default_state_path()
+        self._load_from_disk()
+
+    def _load_from_disk(self) -> None:
+        stored = load_state(self._state_path)
+        if not stored:
+            return
+        self._settings = {**deepcopy(DEFAULT_SETTINGS), **stored.get("settings", {})}
+        raw_plants = list(stored.get("plants", []))
+        raw_candidates = list(stored.get("candidates", []))
+        self._plants = self._sanitize_plants(raw_plants)
+        self._candidates = self._sanitize_candidates(raw_candidates)
+        self._tasks = list(stored.get("tasks", []))
+        self._plant_knowledge_cache = dict(stored.get("plant_knowledge_cache", {}))
+        self.rebuild_yard_location_labels_from_plants()
+        if len(self._plants) != len(raw_plants) or len(self._candidates) != len(raw_candidates):
+            self.persist()
+        print(f"Loaded yard state from {self._state_path}")
+
+    def _sanitize_candidates(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        clean: List[Dict[str, Any]] = []
+        for row in rows:
+            if not row.get("common_name") or not row.get("bloom_wood"):
+                print(f"Skipping incomplete candidate record: {row.get('id', 'unknown')}")
+                continue
+            sync_plant_location_fields(row)
+            clean.append(row)
+        return clean
+
+    def _sanitize_plants(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        clean: List[Dict[str, Any]] = []
+        for row in rows:
+            if not row.get("common_name") or not row.get("bloom_wood"):
+                print(f"Skipping incomplete plant record: {row.get('id', 'unknown')}")
+                continue
+            sync_plant_location_fields(row)
+            clean.append(row)
+        return clean
+
+    def _snapshot(self) -> Dict[str, Any]:
+        return {
+            "settings": self._settings,
+            "plants": self._plants,
+            "candidates": self._candidates,
+            "tasks": self._tasks,
+            "plant_knowledge_cache": self._plant_knowledge_cache,
         }
-        self._seed_initial_plants()
 
-    def _seed_initial_plants(self):
-        """Initial in-memory garden plants for demonstration."""
-        self._plants = [
-            {
-                "id": "p-1",
-                "common_name": "Bigleaf Hydrangea",
-                "species": "Hydrangea macrophylla",
-                "genus": "Hydrangea",
-                "location_label": "Front walkway border",
-                "confidence": 0.94,
-                "reasoning": "Opposite serrated ovate leaves with terminal mophead floral structure on previous season canes.",
-                "bloom_wood": "old_wood",
-                "frost_sensitivity": "semi_hardy",
-                "frost_threshold_f": 32,
-                "care_category": "shrub",
-                "confirmed": True
-            },
-            {
-                "id": "p-2",
-                "common_name": "San Marzano Tomato",
-                "species": "Solanum lycopersicum",
-                "genus": "Solanum",
-                "location_label": "Raised cedar box #1",
-                "confidence": 0.98,
-                "reasoning": "Compound pinnate foliage with gland-tipped hairs, distinct aroma, and tender yellow flower clusters.",
-                "bloom_wood": "not_applicable",
-                "frost_sensitivity": "tender",
-                "frost_threshold_f": 36,
-                "care_category": "vegetable",
-                "confirmed": True
-            },
-            {
-                "id": "p-3",
-                "common_name": "Meyer Lemon",
-                "species": "Citrus x meyeri",
-                "genus": "Citrus",
-                "location_label": "South deck container",
-                "confidence": 0.96,
-                "reasoning": "Glossy coriaceous leaves with narrowly winged petioles, highly sensitive to freezing temperatures.",
-                "bloom_wood": "both",
-                "frost_sensitivity": "tender",
-                "frost_threshold_f": 34,
-                "care_category": "fruit_tree",
-                "confirmed": True
-            },
-            {
-                "id": "p-4",
-                "common_name": "Garden Rose",
-                "species": "Rosa spp.",
-                "genus": "Rosa",
-                "location_label": "Walkway trellised arbor",
-                "confidence": 0.92,
-                "reasoning": "Thorny canes with alternate pinnate 5-leaflet leaves, repeat blooms on new season canes.",
-                "bloom_wood": "new_wood",
-                "frost_sensitivity": "semi_hardy",
-                "frost_threshold_f": 28,
-                "care_category": "shrub",
-                "confirmed": True
-            },
-            {
-                "id": "p-5",
-                "common_name": "English Lavender",
-                "species": "Lavandula angustifolia",
-                "genus": "Lavandula",
-                "location_label": "West terrace rockery",
-                "confidence": 0.95,
-                "reasoning": "Linear grey-green aromatic leaves on compact woody base, cold hardy.",
-                "bloom_wood": "old_wood",
-                "frost_sensitivity": "hardy",
-                "frost_threshold_f": 20,
-                "care_category": "herb",
-                "confirmed": True
-            }
-        ]
-        self._candidates = [
-            {
-                "id": "cand-1",
-                "common_name": "Plantain Lily (Hosta)",
-                "species": "Hosta spp.",
-                "genus": "Hosta",
-                "location_label": "East fence shade garden",
-                "confidence": 0.88,
-                "reasoning": "Broad cordate ribbed foliage in basal rosette.",
-                "bloom_wood": "not_applicable",
-                "frost_sensitivity": "hardy",
-                "frost_threshold_f": 28,
-                "care_category": "perennial",
-                "confirmed": False
-            }
-        ]
+    def persist(self) -> None:
+        save_state(self._snapshot(), self._state_path)
 
-    # Memory Accessors
+    def get_plant_knowledge_cache_key(self, plant_name: str, species: Optional[str] = None) -> str:
+        return normalize_plant_cache_key(plant_name, species)
+
+    def get_cached_plant_profile(
+        self, plant_name: str, species: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        key = self.get_plant_knowledge_cache_key(plant_name, species)
+        hit = self._plant_knowledge_cache.get(key)
+        return deepcopy(hit) if hit else None
+
+    def set_cached_plant_profile(
+        self, plant_name: str, species: Optional[str], profile: Dict[str, Any]
+    ) -> None:
+        key = self.get_plant_knowledge_cache_key(plant_name, species)
+        self._plant_knowledge_cache[key] = deepcopy(profile)
+        self.persist()
+
     def get_plants(self) -> List[Dict[str, Any]]:
         return self._plants
 
@@ -130,33 +149,99 @@ class AgentMemory:
 
     def add_candidate(self, candidate: Dict[str, Any]):
         self._candidates.insert(0, candidate)
+        self.persist()
 
     def remove_candidate(self, candidate_id: str):
         self._candidates = [c for c in self._candidates if c["id"] != candidate_id]
+        self.persist()
 
     def confirm_candidate(self, candidate_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cand = next((c for c in self._candidates if c["id"] == candidate_id), None)
         if cand:
             self._candidates = [c for c in self._candidates if c["id"] != candidate_id]
             new_plant = {**cand, **updates, "confirmed": True}
+            sync_plant_location_fields(new_plant)
             self._plants.append(new_plant)
+            self.rebuild_yard_location_labels_from_plants()
+            self.persist()
             return new_plant
         return None
 
     def delete_plant(self, plant_id: str):
         self._plants = [p for p in self._plants if p["id"] != plant_id]
         self._tasks = [t for t in self._tasks if t.get("plant_id") != plant_id]
+        self.rebuild_yard_location_labels_from_plants()
+        self.persist()
+
+    def update_plant(self, plant_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for plant in self._plants:
+            if plant["id"] == plant_id:
+                plant.update(updates)
+                if "location_labels" in updates or "location_label" in updates:
+                    sync_plant_location_fields(plant)
+                    labels = plant_location_labels(plant)
+                    if labels:
+                        self._settings["last_location_label"] = labels[-1]
+                self.rebuild_yard_location_labels_from_plants()
+                self.persist()
+                return plant
+        return None
+
+    def rebuild_yard_location_labels_from_plants(self) -> None:
+        labels: List[str] = []
+        seen: set = set()
+        for row in self._plants + self._candidates:
+            for lab in plant_location_labels(row):
+                if lab not in seen:
+                    seen.add(lab)
+                    labels.append(lab)
+        self._settings["yard_location_labels"] = labels[:24]
+
+    def remember_yard_location_label(self, label: str) -> None:
+        clean = " ".join((label or "").split())
+        if not clean:
+            return
+        labels = list(self._settings.get("yard_location_labels") or [])
+        if clean not in labels:
+            labels.insert(0, clean)
+        self._settings["yard_location_labels"] = labels[:24]
+        self._settings["last_location_label"] = clean
+
+    def apply_yard_location_renames(self, rename_map: Optional[Dict[str, str]] = None) -> None:
+        if rename_map:
+            for old, new in rename_map.items():
+                old_st = _normalize_location_label(old)
+                new_st = _normalize_location_label(new)
+                if not old_st or not new_st or old_st == new_st:
+                    continue
+                for plant in self._plants + self._candidates:
+                    labs = plant_location_labels(plant)
+                    plant["location_labels"] = [
+                        new_st if _normalize_location_label(lab) == old_st else lab for lab in labs
+                    ]
+                    sync_plant_location_fields(plant)
+        self.rebuild_yard_location_labels_from_plants()
+        self.persist()
+
+    def apply_yard_location_catalog(
+        self,
+        labels: List[str],
+        rename_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.apply_yard_location_renames(rename_map)
 
     def get_tasks(self) -> List[Dict[str, Any]]:
         return self._tasks
 
     def set_tasks(self, tasks: List[Dict[str, Any]]):
         self._tasks = tasks
+        self.persist()
 
     def toggle_task(self, task_id: str) -> Optional[Dict[str, Any]]:
         for task in self._tasks:
             if task["id"] == task_id:
                 task["done"] = not task.get("done", False)
+                self.persist()
                 return task
         return None
 
@@ -165,7 +250,8 @@ class AgentMemory:
 
     def update_settings(self, new_settings: Dict[str, Any]) -> Dict[str, Any]:
         self._settings.update(new_settings)
+        self.persist()
         return self._settings
 
-# Global ephemeral memory instance
+
 memory = AgentMemory()

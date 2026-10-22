@@ -25,6 +25,14 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 class YardSlothHTTPHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        # Default BaseHTTPRequestHandler writes access logs to stderr; use stdout instead.
+        sys.stdout.write(
+            "%s - - [%s] %s\n"
+            % (self.address_string(), self.log_date_time_string(), format % args)
+        )
+        sys.stdout.flush()
+
     def _set_headers(self, status=200, content_type="application/json"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -75,6 +83,11 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        elif path == "/api/ollama/status":
+            status, data = routes.handle_get_ollama_status()
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         elif path == "/health":
             self._set_headers(200)
             self.wfile.write(json.dumps({"status": "healthy", "engine": "python3"}).encode("utf-8"))
@@ -103,6 +116,21 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        elif path == "/api/plants/update":
+            status, data = routes.handle_post_update_plant(body)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif path == "/api/plants/update-location":
+            status, data = routes.handle_update_yard_locations(body)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif path == "/api/yard-locations":
+            status, data = routes.handle_update_yard_locations(body)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         elif path == "/api/census/identify":
             status, data = routes.handle_identify_plant(body)
             self._set_headers(status)
@@ -110,6 +138,11 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/calendar/generate":
             status, data = routes.handle_generate_tasks()
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif path == "/api/tonight/evening-checklist":
+            status, data = routes.handle_post_evening_checklist()
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
@@ -131,6 +164,12 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             parts = path.split("/")
             task_id = parts[4]
             status, data = routes.handle_toggle_task(task_id)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+        elif path.startswith("/api/plants/") and not path.endswith("/toggle"):
+            plant_id = path.replace("/api/plants/", "", 1)
+            body = self._read_json_body()
+            status, data = routes.handle_update_plant(plant_id, body)
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
         else:

@@ -45,7 +45,7 @@ export const FrostBanner: React.FC<FrostBannerProps> = ({
             <div className="text-sm">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-semibold tracking-tight font-display">
-                  {isFreezing ? 'Frost Watch Agent (MCP Live Forecast)' : 'Evening Garden Status'}
+                  {isFreezing ? 'Your Frost Watch Agent' : 'Evening Garden Status'}
                 </span>
                 <span className="text-xs font-mono font-medium opacity-80 tabular-nums">
                   Overnight Low: {alert.temp_min_f}°F
@@ -60,26 +60,6 @@ export const FrostBanner: React.FC<FrostBannerProps> = ({
                 {alert.text}
               </p>
             </div>
-          </div>
-
-          <div className="flex items-center gap-2.5 self-end sm:self-auto shrink-0">
-            <button
-              onClick={onToggleSimulation}
-              className="text-xs font-medium px-3 py-1.5 rounded-lg border border-stone-300/80 bg-white hover:bg-stone-50 text-stone-700 transition-colors shadow-2xs whitespace-nowrap"
-            >
-              {simulationActive ? 'Use Live Weather' : 'Test Cold Snap (31°F)'}
-            </button>
-
-            <button
-              onClick={onViewTonight}
-              className={`text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
-                isFreezing
-                  ? 'bg-amber-900 text-amber-50 hover:bg-amber-800'
-                  : 'bg-emerald-900 text-emerald-50 hover:bg-emerald-800'
-              }`}
-            >
-              Action Plan →
-            </button>
           </div>
         </div>
       </div>

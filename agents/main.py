@@ -12,6 +12,7 @@ All data is ephemeral in memory; tools browse the web via MCP.
 from agents.agent.census_agent import census_agent
 from agents.agent.calendar_agent import calendar_agent
 from agents.agent.frost_agent import frost_agent
+from agents.agent.evening_checklist_agent import evening_checklist_agent
 from agents.memory.agent_memory import memory
 from agents.mcp.mcp_client import mcp_client
 
@@ -34,6 +35,10 @@ class YardSlothCrewPipeline:
     def run_frost_watch(self):
         """Run Frost Watch Agent to evaluate tonight's freeze hazard."""
         return self.frost.evaluate_frost_threat()
+
+    def run_evening_checklist(self):
+        """On-demand evening checklist from user's plants + tonight's forecast."""
+        return evening_checklist_agent.generate()
 
 pipeline = YardSlothCrewPipeline()
 

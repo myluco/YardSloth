@@ -23,10 +23,8 @@ except ImportError:
     from server.config import HOST, PORT
     from server.http_server import run_server
 
-from agents.main import pipeline
-
 if __name__ == "__main__":
-    print("Pre-initializing agents and memory state...")
-    pipeline.run_calendar()
-    print("Agents ready. Starting Python HTTP Server...")
+    # Start HTTP immediately; calendar/tasks are generated on demand via API
+    # (avoids blocking startup on multiple Ollama calls while the UI loads).
+    print("Starting Python HTTP Server...")
     run_server(host=HOST, port=PORT)
