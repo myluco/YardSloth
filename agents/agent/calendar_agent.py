@@ -21,6 +21,23 @@ class CareCalendarAgent:
         loc = " · ".join(locs)
         return f"{action} {name} @ {loc}" if loc else f"{action} {name}"
 
+    def _care_knowledge_from_plant_record(self, plant: Dict[str, Any]) -> Dict[str, Any] | None:
+        """Use confirmed plant fields only — never call Ollama during calendar generation."""
+        bloom_wood = plant.get("bloom_wood")
+        if not bloom_wood:
+            return None
+        return {
+            "bloom_wood": bloom_wood,
+            "prune_directions": plant.get("prune_directions", ""),
+            "prune_rules": plant.get("prune_rules", ""),
+            "prune_window": plant.get("prune_window", ""),
+            "fertilize_window": plant.get("fertilize_window", ""),
+            "fertilize_type": plant.get("fertilize_type", ""),
+            "mulch_rules": plant.get("mulch_rules", ""),
+            "care_category": plant.get("care_category", ""),
+            "source": "plant_record",
+        }
+
     def _care_knowledge_for_plant(self, plant: Dict[str, Any]) -> Dict[str, Any]:
         cached = memory.get_cached_plant_profile(
             plant.get("common_name", ""),
@@ -29,16 +46,9 @@ class CareCalendarAgent:
         if cached:
             return cached
 
-        if plant.get("bloom_wood") and plant.get("prune_rules"):
-            return {
-                "bloom_wood": plant.get("bloom_wood"),
-                "prune_rules": plant.get("prune_rules", ""),
-                "prune_window": plant.get("prune_window", ""),
-                "fertilize_window": plant.get("fertilize_window", ""),
-                "fertilize_type": plant.get("fertilize_type", ""),
-                "mulch_rules": plant.get("mulch_rules", ""),
-                "source": "plant_record",
-            }
+        from_record = self._care_knowledge_from_plant_record(plant)
+        if from_record:
+            return from_record
 
         return self.mcp.call_tool(
             "web_browse_plant_care",
@@ -79,7 +89,9 @@ class CareCalendarAgent:
 
         for plant in plants:
             knowledge = self._care_knowledge_for_plant(plant)
-            bloom_wood = knowledge.get("bloom_wood", plant.get("bloom_wood", "new_wood"))
+            bloom_wood = knowledge.get(
+                "bloom_wood", plant.get("bloom_wood", "not_applicable")
+            )
 
             # 1. Pruning chore
             if bloom_wood == "old_wood":
@@ -95,7 +107,8 @@ class CareCalendarAgent:
                     "location_label": plant.get("location_label", ""),
                     "due_date": prune_dt.strftime("%Y-%m-%d"),
                     "why": "CRITICAL: Blooms on OLD WOOD. Summer pruning allows plant to set next year's flower buds. Late winter pruning destroys all blooms.",
-                    "how": knowledge.get("prune_rules", "Cut spent flower heads down to the first pair of healthy plump buds."),
+                    "how": knowledge.get("prune_rules")
+                    or knowledge.get("prune_directions", "Cut spent flower heads down to the first pair of healthy plump buds."),
                     "done": False,
                     "priority": "high"
                 })
@@ -113,7 +126,8 @@ class CareCalendarAgent:
                     "location_label": plant.get("location_label", ""),
                     "due_date": prune_dt.strftime("%Y-%m-%d"),
                     "why": "Blooms on NEW WOOD. Heavy dormant pruning encourages vigorous new flowering canes for summer.",
-                    "how": knowledge.get("prune_rules", "Cut canes back by one-third at a 45-degree angle just above outward-facing bud."),
+                    "how": knowledge.get("prune_rules")
+                    or knowledge.get("prune_directions", "Cut canes back by one-third at a 45-degree angle just above outward-facing bud."),
                     "done": False,
                     "priority": "normal"
                 })

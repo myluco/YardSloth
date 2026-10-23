@@ -25,7 +25,7 @@ server/
 - **Live MCP Tooling**: Real-time web browsing via Model Context Protocol for weather, frost boundaries, and botanical care rules.
 - **REST Endpoints**:
   - `GET /api/settings`, `POST /api/settings`
-  - `GET /api/plants`, `POST /api/plants/confirm`, `DELETE /api/plants/:id`
+  - `GET /api/plants`, `POST /api/plants/confirm`, `POST /api/plants/refresh`, `POST /api/plants/refresh-all`, `DELETE /api/plants/:id`
   - `POST /api/census/identify`
   - `GET /api/calendar/tasks`, `POST /api/calendar/generate`, `PUT /api/calendar/tasks/:id/toggle`
   - `GET /api/calendar/export-ics`

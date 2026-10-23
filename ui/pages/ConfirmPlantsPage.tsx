@@ -1,9 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   Check,
   X,
   Edit3,
   Trash2,
+  RefreshCw,
 } from 'lucide-react';
 import { PlantCandidate, Settings } from '../shared/types';
 import {
@@ -23,6 +25,66 @@ function confidencePercent(confidence?: number): number {
   return Math.round(confidence * 100);
 }
 
+function formatCareRefreshedAt(iso?: string): string {
+  if (!iso?.trim()) return 'Unknown';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+const PLANT_EXTRA_CARE_FIELDS: { key: keyof PlantCandidate; label: string }[] = [
+  { key: 'propagation_technique', label: 'Best propagation method' },
+  { key: 'propagation_window', label: 'Best time to propagate' },
+  { key: 'seed_germination_window', label: 'Seed sowing (if used)' },
+  { key: 'flowering_period', label: 'Flowers' },
+  { key: 'fruiting_period', label: 'Fruit' },
+];
+
+function isNotApplicablePlantValue(value?: string): boolean {
+  const trimmed = (value || '').trim();
+  if (!trimmed) return true;
+  const normalized = trimmed.toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return /^(not applicable|n\/a|na|none)$/.test(normalized);
+}
+
+function pruneDirectionsForCard(plant: PlantCandidate): string | null {
+  for (const field of [plant.prune_directions, plant.prune_rules]) {
+    const text = (field || '').trim();
+    if (text && !isNotApplicablePlantValue(text)) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function PlantCareExtras({ plant }: { plant: PlantCandidate }) {
+  const rows = PLANT_EXTRA_CARE_FIELDS.filter(
+    ({ key }) => !isNotApplicablePlantValue(plant[key] as string | undefined)
+  );
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="mt-2 pt-2 border-t border-stone-100 space-y-1 text-[11px] text-stone-600 leading-relaxed">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-400 mb-0.5">
+        Season & propagation
+      </div>
+      {rows.map(({ key, label }) => (
+        <div key={key}>
+          <span className="font-medium text-stone-500">{label}: </span>
+          <span className="text-stone-700">{plant[key] as string}</span>
+        </div>
+      ))}
+      <p className="text-[10px] text-stone-400 pt-1">
+        Propagation and season notes are AI-generated (Ollama)—verify with local native-plant
+        guides.
+        {plant.propagation_prior_source
+          ? ` Curated prior applied: ${plant.propagation_prior_source}.`
+          : ''}
+      </p>
+    </div>
+  );
+}
+
 interface ConfirmPlantsPageProps {
   settings: Settings;
   candidates: PlantCandidate[];
@@ -40,6 +102,8 @@ interface ConfirmPlantsPageProps {
     location_labels?: string[];
   }) => Promise<void>;
   onWalkYard: () => void;
+  onRefreshPlantCare: (plantId: string) => Promise<void>;
+  onRefreshAllPlantsCare: () => Promise<void>;
 }
 
 export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
@@ -52,6 +116,8 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
   onUpdatePlant,
   onYardLocationsSave,
   onWalkYard,
+  onRefreshPlantCare,
+  onRefreshAllPlantsCare,
 }) => {
   const [editingCandidate, setEditingCandidate] = useState<PlantCandidate | null>(null);
   const [editForm, setEditForm] = useState({
@@ -66,6 +132,48 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
   const [newLocationInput, setNewLocationInput] = useState('');
   const [locationSaveError, setLocationSaveError] = useState<string | null>(null);
   const [isSavingLocations, setIsSavingLocations] = useState(false);
+  const [refreshingPlantId, setRefreshingPlantId] = useState<string | null>(null);
+  const [refreshingAll, setRefreshingAll] = useState(false);
+  const [careRefreshMessage, setCareRefreshMessage] = useState<string | null>(null);
+  const [careRefreshError, setCareRefreshError] = useState<string | null>(null);
+  const careNoticeRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (careRefreshError && careNoticeRef.current) {
+      careNoticeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [careRefreshError]);
+
+  const runRefreshOne = async (plantId: string) => {
+    setCareRefreshError(null);
+    setCareRefreshMessage(null);
+    setRefreshingPlantId(plantId);
+    try {
+      await onRefreshPlantCare(plantId);
+      setCareRefreshMessage('Plant care data updated from Ollama for your garden zone.');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not refresh plant data.';
+      flushSync(() => setCareRefreshError(message));
+      console.error('[YardSloth] plant refresh error:', message);
+    } finally {
+      setRefreshingPlantId(null);
+    }
+  };
+
+  const runRefreshAll = async () => {
+    if (plants.length === 0) return;
+    setCareRefreshError(null);
+    setCareRefreshMessage(null);
+    setRefreshingAll(true);
+    try {
+      await onRefreshAllPlantsCare();
+      setCareRefreshMessage(`Refreshed care data for ${plants.length} plant(s). Calendar tasks were regenerated.`);
+    } catch (err) {
+      setCareRefreshError(err instanceof Error ? err.message : 'Could not refresh all plants.');
+    } finally {
+      setRefreshingAll(false);
+    }
+  };
 
   const locationLabelPool = useMemo(() => {
     const pool = new Set(collectInUseLocationLabels(plants, candidates));
@@ -154,6 +262,24 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
 
   return (
     <div className="space-y-10 pb-12">
+      <div ref={careNoticeRef} className="scroll-mt-24" aria-hidden={!careRefreshError && !careRefreshMessage} />
+      {(careRefreshMessage || careRefreshError) && (
+        <div
+          role="alert"
+          aria-live="assertive"
+          className={`rounded-xl px-4 py-3 border text-sm shadow-sm ${
+            careRefreshError
+              ? 'bg-red-50 border-red-300 text-red-900'
+              : 'bg-emerald-50 border-emerald-200 text-emerald-950'
+          }`}
+        >
+          <p className="font-semibold">{careRefreshError ? 'Refresh failed' : 'Refresh complete'}</p>
+          <p className="mt-1 text-xs leading-relaxed whitespace-pre-wrap break-words">
+            {careRefreshError || careRefreshMessage}
+          </p>
+        </div>
+      )}
+
       {/* Top Section: Pending Candidates */}
       <div className="space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -195,6 +321,7 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {candidates.map((cand) => {
               const pct = confidencePercent(cand.confidence);
+              const pruneText = pruneDirectionsForCard(cand);
               return (
                 <div
                   key={cand.id}
@@ -237,16 +364,18 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2 text-xs pt-1">
-                      <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-100">
-                        <span className="text-[10px] text-stone-400 uppercase block font-mono">
-                          Bloom Wood
-                        </span>
-                        <span className="font-semibold text-stone-800 capitalize">
-                          {labelFromSnake(cand.bloom_wood)}
-                        </span>
-                      </div>
-                      <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-100">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs pt-1">
+                      {pruneText ? (
+                        <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-100 sm:col-span-2">
+                          <span className="text-[10px] text-stone-400 uppercase block font-mono">
+                            Pruning
+                          </span>
+                          <p className="font-medium text-stone-800 leading-relaxed mt-0.5">
+                            {pruneText}
+                          </p>
+                        </div>
+                      ) : null}
+                      <div className="p-2.5 rounded-lg bg-stone-50 border border-stone-100 sm:col-span-2">
                         <span className="text-[10px] text-stone-400 uppercase block font-mono">
                           Frost Threshold
                         </span>
@@ -255,6 +384,8 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                         </span>
                       </div>
                     </div>
+
+                    <PlantCareExtras plant={cand} />
 
                     <div className="p-3 bg-stone-50/70 rounded-xl border border-stone-100 text-xs text-stone-600 leading-relaxed space-y-2">
                       <div>
@@ -266,6 +397,9 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                           Profile source: {cand.source}
                         </div>
                       ) : null}
+                      <div className="text-[10px] text-stone-500 font-mono">
+                        Care data refreshed: {formatCareRefreshedAt(cand.care_refreshed_at)}
+                      </div>
                     </div>
                   </div>
 
@@ -310,12 +444,21 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
             <h2 className="text-xl font-bold font-display text-stone-900">
               Confirmed Yard Plants ({plants.length})
             </h2>
-            <p className="text-xs text-stone-500 mt-0.5">
-              Held in Python agent memory. Forms the basis for the Care Calendar and evening Frost Watch alerts.
-            </p>
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl overflow-x-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <button
+              type="button"
+              onClick={runRefreshAll}
+              disabled={refreshingAll || plants.length === 0 || refreshingPlantId !== null}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl border border-stone-200 bg-white text-stone-800 hover:bg-stone-50 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              title="Re-fetch Ollama care profiles for every confirmed plant (uses your setup zone)"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshingAll ? 'animate-spin' : ''}`} />
+              {refreshingAll ? 'Refreshing all…' : 'Refresh all plant data'}
+            </button>
+
+            <div className="flex items-center gap-1 p-1 bg-stone-100 rounded-xl overflow-x-auto">
             {['all', 'shrub', 'perennial', 'vegetable', 'fruit_tree', 'herb'].map((cat) => (
               <button
                 key={cat}
@@ -333,11 +476,14 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                   : cat.charAt(0).toUpperCase() + cat.slice(1) + 's'}
               </button>
             ))}
+            </div>
           </div>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-          {filteredPlants.map((plant) => (
+          {filteredPlants.map((plant) => {
+            const pruneText = pruneDirectionsForCard(plant);
+            return (
             <div
               key={plant.id}
               className="bg-white rounded-2xl border border-stone-200/80 p-5 shadow-2xs flex flex-col justify-between hover:border-stone-300 transition-colors"
@@ -362,19 +508,26 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                 </div>
 
                 <div className="mt-3 text-xs text-stone-600 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-stone-400">Pruning Wood:</span>
-                    <span className="font-medium text-stone-800 capitalize">
-                      {labelFromSnake(plant.bloom_wood)}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
+                  {pruneText ? (
+                    <div>
+                      <span className="text-stone-400 block mb-0.5">Pruning</span>
+                      <p className="font-medium text-stone-800 leading-relaxed">
+                        {pruneText}
+                      </p>
+                    </div>
+                  ) : null}
+                  <div className="flex items-center justify-between pt-1">
                     <span className="text-stone-400">Cold Hardiness:</span>
                     <span className="font-mono text-stone-800 tabular-nums font-medium">
                       {plant.frost_sensitivity} (≤{plant.frost_threshold_f}°F)
                     </span>
                   </div>
+                  <div className="pt-1 text-[10px] text-stone-500 font-mono">
+                    Care data refreshed: {formatCareRefreshedAt(plant.care_refreshed_at)}
+                  </div>
                 </div>
+
+                <PlantCareExtras plant={plant} />
 
                 {plant.notes && (
                   <p className="mt-3 pt-3 border-t border-stone-100 text-[11px] text-stone-500 leading-relaxed">
@@ -387,7 +540,19 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                 <span className="text-[11px] text-stone-400 font-mono">
                   ID: {plant.id}
                 </span>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 flex-wrap justify-end">
+                  <button
+                    type="button"
+                    onClick={() => runRefreshOne(plant.id)}
+                    disabled={refreshingPlantId === plant.id || refreshingAll}
+                    className="text-xs text-stone-600 hover:text-stone-900 px-2 py-1 rounded-lg border border-stone-200 inline-flex items-center gap-1 disabled:opacity-50"
+                    title="Re-fetch care and frost traits for this plant"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${refreshingPlantId === plant.id ? 'animate-spin' : ''}`}
+                    />
+                    Refresh data
+                  </button>
                   <button
                     type="button"
                     onClick={() => openLocationEditor(plant.id)}
@@ -406,7 +571,8 @@ export const ConfirmPlantsPage: React.FC<ConfirmPlantsPageProps> = ({
                 </div>
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 

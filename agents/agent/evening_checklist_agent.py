@@ -5,47 +5,13 @@ Builds a same-evening action checklist from the user's confirmed plants
 and live frost/forecast context. Invoked only when the user requests it.
 """
 
-import json
-import re
 from typing import Any, Dict, List
 
 from agents.agent.frost_agent import frost_agent
-from agents.llm.ollama_client import OllamaError, _chat, _ollama_config
+from agents.assets.prompts import build_evening_checklist_user_prompt, format_garden_context_block
+from agents.llm.errors import OllamaError
+from agents.llm.graphs.evening_checklist_workflow import run_evening_checklist_workflow
 from agents.memory.agent_memory import memory, plant_location_labels
-
-
-def _extract_items_json(text: str) -> List[Dict[str, Any]]:
-    raw = text.strip()
-    if not raw:
-        raise OllamaError("Ollama returned an empty checklist response.")
-
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.IGNORECASE)
-    if fence:
-        raw = fence.group(1)
-
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start == -1 or end == -1:
-        raise OllamaError("Checklist response was not valid JSON.")
-
-    data = json.loads(raw[start : end + 1])
-    items = data.get("items")
-    if not isinstance(items, list):
-        raise OllamaError("Checklist JSON must include an items array.")
-
-    clean: List[Dict[str, Any]] = []
-    for idx, row in enumerate(items):
-        if not isinstance(row, dict):
-            continue
-        title = str(row.get("title", "")).strip()
-        desc = str(row.get("description", row.get("desc", ""))).strip()
-        if not title:
-            continue
-        item_id = str(row.get("id", "")).strip() or f"evening-{idx + 1}"
-        clean.append({"id": item_id, "title": title, "description": desc})
-    if not clean:
-        raise OllamaError("Checklist contained no usable items.")
-    return clean[:12]
 
 
 def _deterministic_checklist(
@@ -152,40 +118,27 @@ class EveningChecklistAgent:
             plant_lines.append(
                 f"- {p.get('common_name')} @ {' · '.join(plant_location_labels(p)) or 'yard'}: "
                 f"frost {p.get('frost_sensitivity')}, threshold {p.get('frost_threshold_f')}°F, "
-                f"bloom_wood={p.get('bloom_wood')}, mulch: {p.get('mulch_rules', 'n/a')[:120]}"
+                f"prune: {(p.get('prune_directions') or p.get('prune_rules') or 'n/a')[:120]}, "
+                f"mulch: {p.get('mulch_rules', 'n/a')[:80]}"
             )
         plants_block = "\n".join(plant_lines)
 
-        system = (
-            "You are the Yard Sloth Frost Watch evening planner. Respond with JSON only. "
-            "Include actionable steps ONLY for plants listed by the user—never generic chores "
-            "(no random tomatoes, hoses, or hydrangeas unless that exact plant is listed). "
-            "Steps must be doable before sundown tonight."
+        user_prompt = build_evening_checklist_user_prompt(
+            eval_low_f=eval_low,
+            simulation=is_sim,
+            tonight_low_f=tonight_low,
+            apparent_low_f=apparent_low,
+            alert_text=alert.get("text", "none"),
+            action_summary=alert.get("action", "none"),
+            plants_block=plants_block,
+            garden_context=format_garden_context_block(settings),
+            forecast_location=str(frost_status.get("location") or ""),
         )
-        user_prompt = f"""Tonight's weather context:
-- Effective low for planning: {eval_low}°F (simulation={is_sim})
-- Forecast min: {tonight_low}°F, apparent min: {apparent_low}°F
-- Alert: {alert.get('text', 'none')}
-- Recommended action summary: {alert.get('action', 'none')}
-
-User's confirmed yard plants:
-{plants_block}
-
-Return JSON:
-{{
-  "items": [
-    {{ "id": "short-unique-id", "title": "verb-led step", "description": "1-2 sentences, plant-specific" }}
-  ]
-}}
-Use at most 8 items. Skip plants that need no action tonight."""
 
         source = "rules"
         items: List[Dict[str, Any]] = []
         try:
-            _, model = _ollama_config()
-            content = _chat(user_prompt, system)
-            items = _extract_items_json(content)
-            source = f"ollama:{model}"
+            items, source = run_evening_checklist_workflow(user_prompt)
         except OllamaError as exc:
             print("Evening checklist Ollama fallback:", exc)
 

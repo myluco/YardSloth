@@ -6,10 +6,26 @@ Delegates all intelligence to agents/ and retrieves state from agents/memory.
 """
 
 import json
+import sys
 from datetime import datetime
 from agents.main import pipeline
 from agents.memory.agent_memory import memory
 from agents.llm.ollama_client import OllamaError
+from .ollama_errors import plant_care_error_response
+
+
+def _ollama_error_hint(message: str) -> str | None:
+    lower = message.lower()
+    if "judge stack is not ready" in lower or "missing or unavailable" in lower:
+        return "Pull every model listed in settings or update ollama_model_a/b and ollama_judge_model."
+    if "http 503" in lower or "server busy" in lower:
+        return (
+            "Ollama is overloaded or serializing requests. Retry in a moment, or raise "
+            "OLLAMA_NUM_PARALLEL / OLLAMA_MAX_LOADED_MODELS before starting Ollama."
+        )
+    if "cannot reach ollama" in lower:
+        return "Start the Ollama app or `ollama serve` and confirm ollama_endpoint in settings."
+    return None
 
 
 def _run_calendar():
@@ -45,6 +61,9 @@ def handle_post_settings(body: dict):
         "mock_frost_simulation",
         "ollama_endpoint",
         "ollama_model",
+        "ollama_model_a",
+        "ollama_model_b",
+        "ollama_judge_model",
         "last_location_label",
         "yard_location_labels",
     }
@@ -221,6 +240,72 @@ def handle_post_update_plant(body: dict):
     if not plant_id:
         return 400, {"error": "plant_id is required."}
     return handle_update_plant(str(plant_id), body)
+
+
+def handle_refresh_plant_care(body: dict):
+    plant_id = body.get("plant_id")
+    if not plant_id:
+        return 400, {"error": "plant_id is required."}
+    try:
+        plant = memory.refresh_plant_care_from_ollama(str(plant_id))
+    except ValueError as exc:
+        return 404, {"error": str(exc), "success": False, "failed_stage": "plant_care"}
+    except (OllamaError, RuntimeError, Exception) as exc:
+        status, error_type, err_text = plant_care_error_response(exc)
+        print(
+            f"[YardSloth API] POST /api/plants/refresh {status} plant_care [{error_type}]: {err_text}",
+            file=sys.stderr,
+        )
+        payload = {
+            "error": err_text,
+            "success": False,
+            "failed_stage": "plant_care",
+            "error_type": error_type,
+            "http_status": status,
+        }
+        if status == 503:
+            payload["hint"] = _ollama_error_hint(err_text)
+        return status, payload
+    tasks, err = _run_calendar()
+    warnings = plant.get("llm_warnings") if isinstance(plant.get("llm_warnings"), list) else []
+    payload = {
+        "success": True,
+        "plant_care_ok": True,
+        "plant": plant,
+        "tasks": tasks or memory.get_tasks(),
+        "warnings": warnings,
+    }
+    if err:
+        payload["calendar_error"] = err
+        payload["partial"] = True
+        payload["failed_stage"] = "calendar"
+        return 207, payload
+    if warnings:
+        return 207, {**payload, "partial": True}
+    return 200, payload
+
+
+def handle_refresh_all_plants_care():
+    refreshed_ids, refresh_errors = memory.refresh_all_plants_care_from_ollama()
+    tasks, cal_err = _run_calendar()
+    payload = {
+        "success": len(refresh_errors) == 0,
+        "plants": memory.get_plants(),
+        "tasks": tasks or memory.get_tasks(),
+        "refreshed_count": len(refreshed_ids),
+        "refreshed_ids": refreshed_ids,
+        "errors": refresh_errors,
+    }
+    if cal_err:
+        payload["calendar_error"] = cal_err
+    if not refreshed_ids and refresh_errors:
+        return 503, {**payload, "error": refresh_errors[0].get("error", "Refresh failed")}
+    if refresh_errors:
+        return 207, payload
+    if cal_err:
+        return 503, {**payload, "error": cal_err}
+    return 200, payload
+
 
 def handle_delete_candidate(cand_id: str):
     memory.remove_candidate(cand_id)

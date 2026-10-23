@@ -24,9 +24,17 @@ def default_state_path() -> Path:
     return _project_root() / "data" / "yard_sloth.json"
 
 
-def normalize_plant_cache_key(plant_name: str, species: Optional[str] = None) -> str:
+def normalize_plant_cache_key(
+    plant_name: str,
+    species: Optional[str] = None,
+    climate_scope: Optional[str] = None,
+) -> str:
     raw = (species or plant_name or "").strip().lower()
-    return " ".join(raw.split())
+    base = " ".join(raw.split())
+    scope = " ".join((climate_scope or "").strip().lower().split())
+    if scope:
+        return f"{base}::{scope}"
+    return base
 
 
 def load_state(path: Optional[Path] = None) -> Optional[Dict[str, Any]]:

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { flushSync } from 'react-dom';
 import {
   ThermometerSnowflake,
   Camera,
@@ -24,11 +25,13 @@ import { CalendarPage } from './pages/CalendarPage';
 import { SetupPage } from './pages/SetupPage';
 import { OpenSourceStoryModal } from './components/OpenSourceStoryModal';
 import { LocationModal } from './components/LocationModal';
+import { ActionToast } from './components/ActionToast';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<string>('tonight');
   const [isLoading, setIsLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
 
   const [settings, setSettings] = useState<Settings>({
@@ -198,12 +201,78 @@ export default function App() {
     }
   };
 
+  const reportActionError = (err: unknown, fallback: string) => {
+    const message = err instanceof Error ? err.message : fallback;
+    flushSync(() => {
+      setActionError(message);
+      setCurrentTab('confirm');
+    });
+    return message;
+  };
+
   const handleRegenerateCalendar = async () => {
+    setActionError(null);
     try {
       const res = await api.generateTasks();
       setTasks(res.tasks);
     } catch (err) {
       console.error(err);
+      reportActionError(err, 'Could not regenerate the care calendar.');
+      throw err;
+    }
+  };
+
+  const handleRefreshPlantCare = async (plantId: string) => {
+    setActionError(null);
+    try {
+      const res = await api.refreshPlantCare(plantId);
+      setPlants((prev) => prev.map((p) => (p.id === plantId ? res.plant : p)));
+      setTasks(res.tasks);
+      const forecastData = await api.getForecast();
+      setForecast(forecastData.forecast);
+      setAlert(forecastData.alert);
+      if (res.calendar_error) {
+        const msg = `Plant care updated, but the calendar could not be regenerated: ${res.calendar_error}`;
+        setActionError(msg);
+        setCurrentTab('confirm');
+        throw new Error(msg);
+      }
+      if (res.warnings?.length) {
+        const msg = res.warnings.join(' ');
+        setActionError(msg);
+        setCurrentTab('confirm');
+        throw new Error(msg);
+      }
+    } catch (err) {
+      reportActionError(err, 'Could not refresh plant data.');
+      throw err;
+    }
+  };
+
+  const handleRefreshAllPlantsCare = async () => {
+    setActionError(null);
+    try {
+      const res = await api.refreshAllPlantsCare();
+      setPlants(res.plants);
+      setTasks(res.tasks);
+      const forecastData = await api.getForecast();
+      setForecast(forecastData.forecast);
+      setAlert(forecastData.alert);
+      if (res.errors?.length) {
+        const names = res.errors.map((e) => e.common_name || e.plant_id).join(', ');
+        const msg = `Updated ${res.refreshed_count} plant(s). Failed for: ${names}. ${res.errors[0]?.error || ''}`;
+        setActionError(msg);
+        setCurrentTab('confirm');
+        throw new Error(msg);
+      }
+      if (res.calendar_error) {
+        setActionError(res.calendar_error);
+        setCurrentTab('confirm');
+        throw new Error(res.calendar_error);
+      }
+    } catch (err) {
+      reportActionError(err, 'Could not refresh all plant data.');
+      throw err;
     }
   };
 
@@ -304,6 +373,8 @@ export default function App() {
         onViewTonight={() => setCurrentTab('tonight')}
       />
 
+      <ActionToast message={actionError} onDismiss={() => setActionError(null)} />
+
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-6 pb-24 sm:pb-12">
         {errorMsg && (
           <div className="mb-6 p-4 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-center justify-between">
@@ -313,6 +384,28 @@ export default function App() {
               className="font-semibold underline ml-2 hover:text-red-950"
             >
               Retry
+            </button>
+          </div>
+        )}
+
+        {actionError && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="mb-6 p-4 rounded-xl bg-red-50 border border-red-300 text-red-900 text-sm flex items-start justify-between gap-3 shadow-sm"
+          >
+            <div className="min-w-0">
+              <p className="font-semibold text-red-950">Something went wrong</p>
+              <p className="mt-1 text-xs sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
+                {actionError}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionError(null)}
+              className="shrink-0 text-xs font-semibold text-red-800 underline hover:text-red-950"
+            >
+              Dismiss
             </button>
           </div>
         )}
@@ -349,6 +442,8 @@ export default function App() {
             onUpdatePlant={handleUpdatePlant}
             onYardLocationsSave={handleYardLocationsSave}
             onWalkYard={() => setCurrentTab('walk')}
+            onRefreshPlantCare={handleRefreshPlantCare}
+            onRefreshAllPlantsCare={handleRefreshAllPlantsCare}
           />
         )}
 

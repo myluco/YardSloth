@@ -7,6 +7,7 @@ import {
   EveningChecklistItem,
 } from './types';
 import { collectInUseLocationLabels } from './yardLocations';
+import { httpErrorMessage } from './apiErrors';
 
 type YardLocationsResult = {
   success: boolean;
@@ -246,6 +247,68 @@ export const api = {
       throw new Error(raw);
     }
     return errBody as { plant: PlantCandidate; tasks: GardenTask[] };
+  },
+
+  async refreshPlantCare(
+    plantId: string
+  ): Promise<{
+    success: boolean;
+    plant: PlantCandidate;
+    tasks: GardenTask[];
+    warnings?: string[];
+    partial?: boolean;
+    calendar_error?: string;
+    plant_care_ok?: boolean;
+  }> {
+    const res = await fetch('/api/plants/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plant_id: plantId }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 207) {
+      const message = httpErrorMessage(
+        res.status,
+        body,
+        'Failed to refresh plant data. Check Ollama models and retry.'
+      );
+      console.error('[YardSloth] refreshPlantCare failed:', res.status, body);
+      throw new Error(message);
+    }
+    return body as {
+      success: boolean;
+      plant: PlantCandidate;
+      tasks: GardenTask[];
+      warnings?: string[];
+      partial?: boolean;
+      calendar_error?: string;
+      plant_care_ok?: boolean;
+    };
+  },
+
+  async refreshAllPlantsCare(): Promise<{
+    success: boolean;
+    plants: PlantCandidate[];
+    tasks: GardenTask[];
+    refreshed_count: number;
+    errors: { plant_id?: string; common_name?: string; error: string }[];
+    calendar_error?: string;
+  }> {
+    const res = await fetch('/api/plants/refresh-all', { method: 'POST' });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 207) {
+      throw new Error(
+        httpErrorMessage(res.status, body, 'Failed to refresh all plant data. Check Ollama models and retry.')
+      );
+    }
+    return body as {
+      success: boolean;
+      plants: PlantCandidate[];
+      tasks: GardenTask[];
+      refreshed_count: number;
+      errors: { plant_id?: string; common_name?: string; error: string }[];
+      calendar_error?: string;
+    };
   },
 
   async identifyPlant(data: {

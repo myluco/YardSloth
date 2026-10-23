@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { spawn, ChildProcess, execSync } from 'child_process';
 import dotenv from 'dotenv';
@@ -41,8 +42,19 @@ function startPythonBackend() {
     pythonProcess = null;
   }
   freePythonPort(PYTHON_PORT);
-  console.log(`Launching Python backend on port ${PYTHON_PORT}...`);
-  pythonProcess = spawn('python3', ['server/main.py'], {
+  const pythonBin =
+    process.env.YARD_SLOTH_PYTHON ||
+    (() => {
+      const venvPy = path.join(__dirname, '.venv', 'bin', 'python3');
+      try {
+        fs.accessSync(venvPy);
+        return venvPy;
+      } catch {
+        return 'python3';
+      }
+    })();
+  console.log(`Launching Python backend on port ${PYTHON_PORT} (${pythonBin})...`);
+  pythonProcess = spawn(pythonBin, ['server/main.py'], {
     cwd: __dirname,
     env: {
       ...process.env,
@@ -50,6 +62,8 @@ function startPythonBackend() {
       PYTHON_PORT: String(PYTHON_PORT),
       OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://localhost:11434',
       OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'gemma4:31b-cloud',
+      YARD_SLOTH_LLM_LOG: process.env.YARD_SLOTH_LLM_LOG ?? '1',
+      YARD_SLOTH_LLM_LOG_RESPONSES: process.env.YARD_SLOTH_LLM_LOG_RESPONSES ?? '1',
     },
   });
 

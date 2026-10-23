@@ -20,7 +20,27 @@ export interface PlantCandidate {
   confirmed: boolean;
   notes?: string;
   created_at?: string;
+  /** ISO timestamp when Ollama care profile was last fetched for this record. */
+  care_refreshed_at?: string;
   source?: string;
+  /** Gardener-facing when/how to prune (preferred over bloom_wood labels). */
+  prune_directions?: string;
+  prune_window?: string;
+  prune_rules?: string;
+  fertilize_window?: string;
+  fertilize_type?: string;
+  mulch_rules?: string;
+  reasoning_summary?: string;
+  propagation_window?: string;
+  propagation_technique?: string;
+  seed_germination_window?: string;
+  flowering_period?: string;
+  fruiting_period?: string;
+  propagation_prior_source?: string;
+  research_sources?: string[];
+  horticulture_brief?: string;
+  judge_rationale?: string;
+  llm_warnings?: string[];
 }
 
 export type TaskType = 'prune' | 'fertilize' | 'mulch' | 'frost_protect' | 'harvest' | 'inspect';

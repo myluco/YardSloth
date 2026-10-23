@@ -1,0 +1,142 @@
+"""Parse and validate Ollama plant-care JSON profiles."""
+
+import json
+import re
+from typing import Any, Dict
+
+from agents.assets.prompts import PLANT_PROFILE_EXTENDED_FIELDS, normalize_extended_profile_value
+from agents.llm.errors import OllamaError, OllamaProfileValidationError
+
+BLOOM_WOOD = frozenset({"old_wood", "new_wood", "both", "not_applicable"})
+FROST_SENSITIVITY = frozenset({"tender", "semi_hardy", "hardy"})
+CARE_CATEGORY = frozenset(
+    {"shrub", "perennial", "annual", "fruit_tree", "vegetable", "herb", "houseplant"}
+)
+
+REQUIRED_PROFILE_STRING_KEYS = (
+    "common_name",
+    "species",
+    "bloom_wood",
+    "prune_directions",
+    "prune_window",
+    "prune_rules",
+    "fertilize_window",
+    "fertilize_type",
+    "mulch_rules",
+    "frost_sensitivity",
+    "care_category",
+)
+
+_PROFILE_GAP_DEFAULTS: dict[str, str] = {
+    "fertilize_window": "Early spring when new growth begins in your hardiness zone.",
+    "fertilize_type": "Balanced slow-release fertilizer or compost top-dress; follow label rates.",
+    "mulch_rules": "2–3 inches organic mulch; keep mulch a few inches away from stems/crown.",
+    "prune_rules": "See prune_directions; remove dead or damaged wood first.",
+    "prune_window": "See prune_directions for timing in your zone.",
+}
+
+
+def parse_profile_dict(text: str) -> Dict[str, Any] | None:
+    if not (text or "").strip():
+        return None
+    try:
+        return extract_json_object(text)
+    except OllamaError:
+        return None
+
+
+def merge_profile_field_gaps(
+    primary: Dict[str, Any],
+    *fallback_sources: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Fill empty required keys from gather drafts, then safe defaults."""
+    merged: Dict[str, Any] = dict(primary)
+    for key in REQUIRED_PROFILE_STRING_KEYS:
+        if str(merged.get(key, "")).strip():
+            continue
+        for source in fallback_sources:
+            if not source:
+                continue
+            value = str(source.get(key, "")).strip()
+            if value:
+                merged[key] = value
+                break
+        if not str(merged.get(key, "")).strip() and key in _PROFILE_GAP_DEFAULTS:
+            merged[key] = _PROFILE_GAP_DEFAULTS[key]
+    return merged
+
+
+def extract_json_object(text: str) -> Dict[str, Any]:
+    raw = text.strip()
+    if not raw:
+        raise OllamaError("Ollama returned an empty response.")
+
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL | re.IGNORECASE)
+    if fence:
+        raw = fence.group(1)
+
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise OllamaError("Ollama response did not contain a JSON object.")
+
+    try:
+        return json.loads(raw[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise OllamaError(f"Could not parse Ollama JSON: {exc}") from exc
+
+
+def validate_plant_profile(
+    data: Dict[str, Any],
+    plant_name: str,
+    *,
+    source_label: str,
+) -> Dict[str, Any]:
+    missing = [k for k in REQUIRED_PROFILE_STRING_KEYS if not str(data.get(k, "")).strip()]
+    if missing:
+        raise OllamaProfileValidationError(
+            f"The AI plant profile was incomplete (missing: {', '.join(missing)}). "
+            "Try Refresh again—this is not an Ollama outage."
+        )
+
+    bloom_wood = str(data["bloom_wood"]).strip().lower()
+    frost_sensitivity = str(data["frost_sensitivity"]).strip().lower()
+    care_category = str(data["care_category"]).strip().lower()
+
+    if bloom_wood not in BLOOM_WOOD:
+        raise OllamaError(f"Invalid bloom_wood '{bloom_wood}' from Ollama.")
+    if frost_sensitivity not in FROST_SENSITIVITY:
+        raise OllamaError(f"Invalid frost_sensitivity '{frost_sensitivity}' from Ollama.")
+    if care_category not in CARE_CATEGORY:
+        raise OllamaError(f"Invalid care_category '{care_category}' from Ollama.")
+
+    try:
+        frost_threshold_f = int(round(float(data.get("frost_threshold_f"))))
+    except (TypeError, ValueError):
+        raise OllamaError("Ollama JSON must include numeric frost_threshold_f.")
+
+    profile: Dict[str, Any] = {
+        "common_name": str(data["common_name"]).strip(),
+        "species": str(data["species"]).strip(),
+        "bloom_wood": bloom_wood,
+        "prune_directions": str(data["prune_directions"]).strip(),
+        "prune_window": str(data["prune_window"]).strip(),
+        "prune_rules": str(data["prune_rules"]).strip(),
+        "fertilize_window": str(data["fertilize_window"]).strip(),
+        "fertilize_type": str(data["fertilize_type"]).strip(),
+        "mulch_rules": str(data["mulch_rules"]).strip(),
+        "frost_sensitivity": frost_sensitivity,
+        "frost_threshold_f": frost_threshold_f,
+        "care_category": care_category,
+        "source": source_label,
+        "reasoning_summary": str(data.get("reasoning_summary", "")).strip()
+        or f"Profile generated by Ollama for “{plant_name}”.",
+    }
+    for key in PLANT_PROFILE_EXTENDED_FIELDS:
+        profile[key] = normalize_extended_profile_value(data.get(key, ""))
+
+    if not profile.get("propagation_technique") or not profile.get("propagation_window"):
+        raise OllamaError(
+            "Ollama JSON must include propagation_technique and propagation_window for every plant."
+        )
+    return profile

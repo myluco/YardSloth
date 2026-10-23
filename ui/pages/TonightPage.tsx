@@ -359,7 +359,9 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                       <div className="mt-2 pt-2 border-t border-stone-100 text-[11px] text-stone-700">
                         {plant.bloom_wood === 'old_wood'
                           ? 'Drape frost cloth to shield terminal flower buds.'
-                          : 'Mulch root crown before ground freeze.'}
+                          : plant.frost_sensitivity === 'tender'
+                            ? 'Shelter or move containers before hard frost.'
+                            : 'Mulch root crown before ground freeze.'}
                       </div>
                     </div>
                   ))}

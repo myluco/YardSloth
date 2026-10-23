@@ -5,6 +5,7 @@ In-memory garden state with JSON persistence across restarts.
 """
 
 from copy import deepcopy
+from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 from agents.memory.persistence import (
@@ -54,6 +55,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "mock_frost_simulation": False,
     "ollama_endpoint": "http://localhost:11434",
     "ollama_model": "gemma4:31b-cloud",
+    "ollama_model_a": "gemma4:31b-cloud",
+    "ollama_model_b": "qwen2.5:14b",
+    "ollama_judge_model": "llama3.1:8b",
     "last_location_label": "Front bed, left of steps",
     "yard_location_labels": [
         "Front bed, left of steps",
@@ -88,9 +92,24 @@ class AgentMemory:
         self._tasks = list(stored.get("tasks", []))
         self._plant_knowledge_cache = dict(stored.get("plant_knowledge_cache", {}))
         self.rebuild_yard_location_labels_from_plants()
-        if len(self._plants) != len(raw_plants) or len(self._candidates) != len(raw_candidates):
+        backfilled = self._backfill_care_refreshed_at(self._plants)
+        backfilled |= self._backfill_care_refreshed_at(self._candidates)
+        if (
+            len(self._plants) != len(raw_plants)
+            or len(self._candidates) != len(raw_candidates)
+            or backfilled
+        ):
             self.persist()
         print(f"Loaded yard state from {self._state_path}")
+
+    def _backfill_care_refreshed_at(self, rows: List[Dict[str, Any]]) -> bool:
+        changed = False
+        stamp = datetime.now().isoformat(timespec="seconds")
+        for row in rows:
+            if not str(row.get("care_refreshed_at") or "").strip():
+                row["care_refreshed_at"] = stamp
+                changed = True
+        return changed
 
     def _sanitize_candidates(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         clean: List[Dict[str, Any]] = []
@@ -124,8 +143,19 @@ class AgentMemory:
     def persist(self) -> None:
         save_state(self._snapshot(), self._state_path)
 
+    def _plant_profile_climate_scope(self) -> str:
+        from agents.assets.prompts import PLANT_PROFILE_SCHEMA_VERSION
+
+        zone = str(self._settings.get("zone") or "").strip().lower()
+        zip_code = str(self._settings.get("zip") or "").strip()
+        parts = [p for p in (zone, zip_code) if p]
+        parts.append(f"schema:{PLANT_PROFILE_SCHEMA_VERSION}")
+        return "|".join(parts) if parts else f"unknown|schema:{PLANT_PROFILE_SCHEMA_VERSION}"
+
     def get_plant_knowledge_cache_key(self, plant_name: str, species: Optional[str] = None) -> str:
-        return normalize_plant_cache_key(plant_name, species)
+        return normalize_plant_cache_key(
+            plant_name, species, climate_scope=self._plant_profile_climate_scope()
+        )
 
     def get_cached_plant_profile(
         self, plant_name: str, species: Optional[str] = None
@@ -140,6 +170,54 @@ class AgentMemory:
         key = self.get_plant_knowledge_cache_key(plant_name, species)
         self._plant_knowledge_cache[key] = deepcopy(profile)
         self.persist()
+
+    def clear_cached_plant_profile(
+        self, plant_name: str, species: Optional[str] = None
+    ) -> None:
+        key = self.get_plant_knowledge_cache_key(plant_name, species)
+        if key in self._plant_knowledge_cache:
+            del self._plant_knowledge_cache[key]
+            self.persist()
+
+    def refresh_plant_care_from_ollama(self, plant_id: str) -> Dict[str, Any]:
+        from agents.plant_profile import refresh_plant_record_from_ollama
+
+        plant = next((p for p in self._plants if p["id"] == plant_id), None)
+        if not plant:
+            raise ValueError("Plant not found")
+        refresh_plant_record_from_ollama(plant, skip_cache=True)
+        self.persist()
+        return plant
+
+    def refresh_all_plants_care_from_ollama(self) -> tuple[List[str], List[Dict[str, Any]]]:
+        from agents.llm.ollama_client import OllamaError
+        from agents.plant_profile import refresh_plant_record_from_ollama
+
+        refreshed_ids: List[str] = []
+        errors: List[Dict[str, Any]] = []
+        for plant in list(self._plants):
+            try:
+                refresh_plant_record_from_ollama(plant, skip_cache=True)
+                refreshed_ids.append(plant["id"])
+            except (OllamaError, RuntimeError) as exc:
+                errors.append(
+                    {
+                        "plant_id": plant.get("id"),
+                        "common_name": plant.get("common_name"),
+                        "error": str(exc),
+                    }
+                )
+            except ValueError as exc:
+                errors.append(
+                    {
+                        "plant_id": plant.get("id"),
+                        "common_name": plant.get("common_name"),
+                        "error": str(exc),
+                    }
+                )
+        if refreshed_ids:
+            self.persist()
+        return refreshed_ids, errors
 
     def get_plants(self) -> List[Dict[str, Any]]:
         return self._plants

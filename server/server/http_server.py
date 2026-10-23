@@ -121,6 +121,16 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        elif path == "/api/plants/refresh":
+            status, data = routes.handle_refresh_plant_care(body)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        elif path == "/api/plants/refresh-all":
+            status, data = routes.handle_refresh_all_plants_care()
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         elif path == "/api/plants/update-location":
             status, data = routes.handle_update_yard_locations(body)
             self._set_headers(status)

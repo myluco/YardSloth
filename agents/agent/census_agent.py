@@ -9,6 +9,8 @@ import time
 from typing import Dict, Any, Optional
 from agents.mcp.mcp_client import mcp_client
 from agents.memory.agent_memory import memory
+from agents.assets.prompts import PLANT_PROFILE_EXTENDED_FIELDS
+from agents.plant_profile import stamp_care_refreshed_at
 
 class PlantCensusAgent:
     def __init__(self):
@@ -58,7 +60,8 @@ class PlantCensusAgent:
             "location_labels": [location_label or "Yard walk find"],
             "confidence": confidence,
             "reasoning": reasoning,
-            "bloom_wood": knowledge.get("bloom_wood", "new_wood"),
+            "bloom_wood": knowledge.get("bloom_wood", "not_applicable"),
+            "prune_directions": knowledge.get("prune_directions", ""),
             "frost_sensitivity": knowledge.get("frost_sensitivity", "semi_hardy"),
             "frost_threshold_f": knowledge.get("frost_threshold_f", 32),
             "care_category": knowledge.get("care_category", "shrub"),
@@ -69,16 +72,19 @@ class PlantCensusAgent:
             candidate["photo_url"] = image_base64
 
         for field in (
+            "prune_directions",
             "prune_window",
             "prune_rules",
             "fertilize_window",
             "fertilize_type",
             "mulch_rules",
             "reasoning_summary",
+            *PLANT_PROFILE_EXTENDED_FIELDS.keys(),
         ):
             if knowledge.get(field):
                 candidate[field] = knowledge[field]
 
+        stamp_care_refreshed_at(candidate)
         memory.add_candidate(candidate)
         return candidate
 
