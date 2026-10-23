@@ -133,10 +133,14 @@ PLANT_PROFILE_JUDGE_SYSTEM = (
 )
 
 EVENING_CHECKLIST_JUDGE_SYSTEM = (
-    "You are the judge between two evening frost-protection checklists. Output JSON only "
-    "with shape {\"items\": [{\"id\", \"title\", \"description\"}]}. Keep only steps for "
-    "plants the user listed; merge duplicates; at most 8 items; every step must be doable "
-    "before sundown tonight."
+    "You are the judge between two tonight yard checklists. Output JSON only with shape "
+    '{"items": [{"id", "title", "description", "urgency"}]}. '
+    "urgency must be urgent or optional on every item. Keep only steps for plants the user "
+    "listed; merge duplicates; up to 12 items. urgent = weather-driven protection needed "
+    "before sundown tonight. optional = nice-to-do if you have time, not mandatory. "
+    "You MUST keep every optional item from either draft—do not drop general garden chores "
+    "just because frost steps exist. Merge duplicate frost protection: at most ONE urgent "
+    "cover/protect step per plant (combine multiple tomatoes into one step if needed)."
 )
 
 PLANT_HORTICULTURE_RESEARCH_SYSTEM = (
@@ -223,11 +227,19 @@ Return one merged JSON profile.
 """
 
 
-def build_evening_checklist_judge_user_prompt(models: Any) -> str:
-    return (
-        f"Below you will see two checklist JSON responses from {models.model_a} and "
-        f"{models.model_b}. Return one merged checklist JSON."
-    )
+def build_evening_checklist_judge_user_prompt(
+    models: Any,
+    plant_names: list[str] | None = None,
+) -> str:
+    plants_line = ", ".join(plant_names) if plant_names else "(from the drafts)"
+    return f"""User plants (only these): {plants_line}
+
+Merge rules:
+- At most ONE urgent frost/cover/protect/wrap step per plant. Never list the same plant twice for urgent frost protection.
+- If you combine multiple plants in one urgent step, do NOT also list those plants in separate urgent frost steps.
+- Keep all optional (nice-to-do) items from the drafts unless duplicate.
+
+Below are two checklist JSON responses from {models.model_a} and {models.model_b}. Return one merged checklist JSON."""
 
 
 def build_plant_care_profile_user_prompt(
@@ -283,12 +295,13 @@ Return JSON with exactly these keys:
 
 
 EVENING_CHECKLIST_SYSTEM = (
-    "You are the Yard Sloth Frost Watch evening planner. Respond with JSON only. "
-    "Include actionable steps ONLY for plants listed by the user—never generic chores "
-    "(no random tomatoes, hoses, or hydrangeas unless that exact plant is listed). "
-    "Steps must be doable before sundown tonight. When garden location and USDA zone "
-    "are provided, phrase timing and protection advice for that climate (e.g. coastal "
-    "dew vs dry inland radiative frost)."
+    "You are the Yard Sloth Frost Watch tonight planner. Respond with JSON only. "
+    "Suggest steps ONLY for plants the user listed—never generic chores. "
+    "Always include BOTH kinds when relevant: (1) urgent frost/freeze protection before "
+    "sundown, and (2) optional nice-to-do chores for today (harvest, tidy, water, prune) "
+    "that are helpful but not required. Mark each item urgency urgent or optional. "
+    "Do not label optional pruning, watering, or general care as urgent unless tonight's "
+    "forecast forces it. Include at least 2 optional items when the plant list allows."
 )
 
 
@@ -321,7 +334,12 @@ User's confirmed yard plants:
 Return JSON:
 {{
   "items": [
-    {{ "id": "short-unique-id", "title": "verb-led step", "description": "1-2 sentences, plant-specific" }}
+    {{
+      "id": "short-unique-id",
+      "title": "verb-led step",
+      "description": "1-2 sentences, plant-specific",
+      "urgency": "urgent" | "optional"
+    }}
   ]
 }}
-Use at most 8 items. Skip plants that need no action tonight."""
+Use up to 12 items. On frosty nights include urgent protection steps AND separate optional nice-to-do items (with urgency optional)."""

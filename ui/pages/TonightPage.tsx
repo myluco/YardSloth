@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ThermometerSnowflake,
   CheckCircle2,
@@ -7,16 +7,36 @@ import {
   MapPin,
   Loader2,
   Sparkles,
+  AlertTriangle,
+  Leaf,
 } from 'lucide-react';
 import { ForecastDay, FrostAlert, PlantCandidate, EveningChecklistItem } from '../shared/types';
 import { formatPlantLocations } from '../shared/yardLocations';
-import { api } from '../shared/api';
+import { api, EveningChecklistResponse } from '../shared/api';
+
+function formatChecklistGeneratedAt(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function sortChecklistByUrgency(items: EveningChecklistItem[]): EveningChecklistItem[] {
+  return [...items].sort((a, b) => {
+    const rank = (item: EveningChecklistItem) => (item.urgency === 'urgent' ? 0 : 1);
+    const diff = rank(a) - rank(b);
+    if (diff !== 0) return diff;
+    return a.title.localeCompare(b.title);
+  });
+}
 
 interface TonightPageProps {
   forecast: ForecastDay[];
   alert: FrostAlert | null;
   plants: PlantCandidate[];
   settings: any;
+  simulationActive: boolean;
+  onToggleSimulation: () => Promise<void>;
   onUpdateLocation: (query: string) => Promise<void>;
   onUseGPS: () => Promise<void>;
   onRefresh: () => void;
@@ -27,6 +47,8 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   alert,
   plants,
   settings,
+  simulationActive,
+  onToggleSimulation,
   onUpdateLocation,
   onUseGPS,
   onRefresh,
@@ -38,9 +60,51 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   const [checklistItems, setChecklistItems] = useState<EveningChecklistItem[] | null>(null);
   const [checklistChecked, setChecklistChecked] = useState<Record<string, boolean>>({});
   const [checklistSource, setChecklistSource] = useState<string | null>(null);
+  const [checklistGeneratedAt, setChecklistGeneratedAt] = useState<string | null>(null);
   const [checklistLoading, setChecklistLoading] = useState(false);
+  const [checklistBootstrapping, setChecklistBootstrapping] = useState(true);
   const [checklistError, setChecklistError] = useState<string | null>(null);
   const [checklistNotice, setChecklistNotice] = useState<string | null>(null);
+
+  const applyChecklistResult = useCallback((result: EveningChecklistResponse) => {
+    if (result.message && (!result.items || result.items.length === 0) && !result.generated_at) {
+      setChecklistItems(null);
+      setChecklistGeneratedAt(null);
+      setChecklistNotice(result.message);
+      return;
+    }
+    if (result.generated_at && result.items && result.items.length > 0) {
+      setChecklistItems(sortChecklistByUrgency(result.items));
+      setChecklistSource(result.source ?? null);
+      setChecklistGeneratedAt(result.generated_at);
+      setChecklistChecked(result.checked ?? {});
+      if (result.tonight_low_f != null) {
+        setChecklistNotice(`Planned for an effective low of ${result.tonight_low_f}°F tonight.`);
+      } else {
+        setChecklistNotice(null);
+      }
+      return;
+    }
+    setChecklistItems(null);
+    setChecklistGeneratedAt(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await api.getEveningChecklist();
+        if (!cancelled) applyChecklistResult(result);
+      } catch {
+        /* show CTA if cache unavailable */
+      } finally {
+        if (!cancelled) setChecklistBootstrapping(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyChecklistResult]);
 
   const handleLocationSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,7 +120,11 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   };
 
   const toggleCheck = (id: string) => {
-    setChecklistChecked((prev) => ({ ...prev, [id]: !prev[id] }));
+    setChecklistChecked((prev) => {
+      const next = { ...prev, [id]: !prev[id] };
+      void api.saveEveningChecklistChecked(next).catch(() => {});
+      return next;
+    });
   };
 
   const requestEveningChecklist = async () => {
@@ -65,21 +133,27 @@ export const TonightPage: React.FC<TonightPageProps> = ({
     setChecklistNotice(null);
     try {
       const result = await api.generateEveningChecklist();
-      if (result.message && (!result.items || result.items.length === 0)) {
-        setChecklistItems(null);
-        setChecklistNotice(result.message);
-        return;
-      }
-      setChecklistItems(result.items);
-      setChecklistSource(result.source);
-      setChecklistChecked({});
-      if (result.tonight_low_f != null) {
-        setChecklistNotice(`Planned for an effective low of ${result.tonight_low_f}°F tonight.`);
-      }
+      applyChecklistResult(result);
     } catch (err) {
       setChecklistError(err instanceof Error ? err.message : 'Could not build checklist.');
     } finally {
       setChecklistLoading(false);
+    }
+  };
+
+  const handleDemoFreezeToggle = async () => {
+    const enabling = !simulationActive;
+    setChecklistError(null);
+    try {
+      await onToggleSimulation();
+      setChecklistItems(null);
+      setChecklistGeneratedAt(null);
+      setChecklistChecked({});
+      if (enabling && plants.length > 0) {
+        await requestEveningChecklist();
+      }
+    } catch (err) {
+      setChecklistError(err instanceof Error ? err.message : 'Could not toggle demo freeze.');
     }
   };
 
@@ -95,6 +169,11 @@ export const TonightPage: React.FC<TonightPageProps> = ({
   const tenderPlants = plants.filter((p) => p.frost_sensitivity === 'tender');
   const semiHardyPlants = plants.filter((p) => p.frost_sensitivity === 'semi_hardy');
   const hardyPlants = plants.filter((p) => p.frost_sensitivity === 'hardy');
+
+  const sortedChecklistItems = useMemo(
+    () => (checklistItems ? sortChecklistByUrgency(checklistItems) : null),
+    [checklistItems],
+  );
 
   return (
     <div className="space-y-6 pb-12">
@@ -224,6 +303,11 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                           }`}
                         >
                           {day.temp_min}°F
+                          {isToday && day.simulated && day.actual_temp_min != null && (
+                            <span className="block text-[10px] font-normal text-stone-500">
+                              demo (live {day.actual_temp_min}°F)
+                            </span>
+                          )}
                         </td>
                         <td className="py-3 px-3 text-right font-mono tabular-nums text-stone-500">
                           {day.precip_prob}%
@@ -392,16 +476,47 @@ export const TonightPage: React.FC<TonightPageProps> = ({
           </div>
         </div>
 
-        {/* Right Col: Evening Action Checklist & Control Strip */}
+        {/* Right Col: Tonight suggestions */}
         <div className="space-y-6">
+          <div className="bg-amber-50/60 rounded-2xl p-4 border border-amber-200/80 shadow-2xs">
+            <h3 className="text-sm font-bold font-display text-stone-900">Demo: freeze tonight</h3>
+            <p className="text-xs text-stone-600 mt-1 leading-relaxed">
+              Pretend tonight&apos;s low is <span className="font-semibold">31°F</span> so Frost Watch and
+              tonight&apos;s suggestions behave like a real frost night. Live forecast is unchanged in the
+              data source; only planning uses the demo low.
+            </p>
+            <button
+              type="button"
+              disabled={checklistLoading}
+              onClick={() => void handleDemoFreezeToggle()}
+              className={`mt-3 w-full py-2.5 px-4 rounded-xl text-xs font-semibold border transition-colors ${
+                simulationActive
+                  ? 'bg-white border-amber-300 text-amber-950 hover:bg-amber-50'
+                  : 'bg-amber-800 border-amber-900 text-white hover:bg-amber-700'
+              }`}
+            >
+              {simulationActive ? 'Turn off demo freeze (use live forecast)' : 'Simulate 31°F freeze tonight'}
+            </button>
+          </div>
+
           <div className="bg-white rounded-2xl p-6 border border-stone-200/80 shadow-2xs">
             <h3 className="text-base font-bold font-display text-stone-900 flex items-center gap-2">
               <CheckCircle2 className="w-5 h-5 text-emerald-700" />
-              Evening Action Checklist
+              Tasks for today in the yard
             </h3>
-            <p className="text-xs text-stone-500 mt-0.5 mb-4">
-              Not shown until you ask. The Frost Watch agent reviews your confirmed plants and tonight&apos;s forecast, then suggests steps for this evening only.
+            <p className="text-xs text-stone-500 mt-0.5 mb-3">
+              Your agent will indicate what tasks you can complete today. If there is a weather event that requires immediate action, it will be indicated as urgent.
             </p>
+            <div className="flex flex-wrap gap-3 text-[10px] font-medium text-stone-600 mb-4">
+              <span className="inline-flex items-center gap-1">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-700" aria-hidden />
+                Urgent (weather)
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <Leaf className="w-3.5 h-3.5 text-emerald-600" aria-hidden />
+                Optional if you have time
+              </span>
+            </div>
 
             {checklistError && (
               <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-3">
@@ -414,7 +529,12 @@ export const TonightPage: React.FC<TonightPageProps> = ({
               </p>
             )}
 
-            {checklistItems === null ? (
+            {checklistBootstrapping ? (
+              <p className="text-xs text-stone-500 flex items-center gap-2 py-2">
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                Loading today&apos;s saved suggestions…
+              </p>
+            ) : checklistItems === null ? (
               <button
                 type="button"
                 disabled={checklistLoading || plants.length === 0}
@@ -429,20 +549,31 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    Build my evening checklist
+                    See what might help tonight
                   </>
                 )}
               </button>
             ) : (
               <div className="space-y-3">
+                {checklistGeneratedAt && (
+                  <p className="text-[11px] text-stone-600 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2">
+                    Last evaluated{' '}
+                    <span className="font-semibold text-stone-800">
+                      {formatChecklistGeneratedAt(checklistGeneratedAt)}
+                    </span>
+                    . Saved for today—use refresh only if the forecast or your plants changed.
+                  </p>
+                )}
                 {checklistNotice && (
                   <p className="text-[11px] text-stone-500">{checklistNotice}</p>
                 )}
                 {checklistSource && (
                   <p className="text-[10px] font-mono text-stone-400">Source: {checklistSource}</p>
                 )}
-                {checklistItems.map((item) => {
+                {sortedChecklistItems?.map((item) => {
                   const checked = checklistChecked[item.id];
+                  const isUrgent = item.urgency === 'urgent';
+                  const UrgencyIcon = isUrgent ? AlertTriangle : Leaf;
                   return (
                     <button
                       key={item.id}
@@ -451,17 +582,23 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                       className={`w-full text-left p-3.5 rounded-xl border transition-all flex items-start gap-3 ${
                         checked
                           ? 'bg-emerald-50/70 border-emerald-200/80 text-stone-600'
-                          : 'bg-white border-stone-200 hover:border-stone-300 text-stone-900 shadow-2xs'
+                          : isUrgent
+                            ? 'bg-amber-50/40 border-amber-200/80 hover:border-amber-300 text-stone-900 shadow-2xs'
+                            : 'bg-white border-stone-200 hover:border-stone-300 text-stone-900 shadow-2xs'
                       }`}
                     >
                       <div
-                        className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
-                          checked ? 'bg-emerald-700 text-white' : 'border border-stone-300 bg-stone-50'
+                        className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${
+                          isUrgent
+                            ? 'bg-amber-100 text-amber-800'
+                            : 'bg-emerald-50 text-emerald-600'
                         }`}
+                        title={isUrgent ? 'Urgent — weather' : 'Optional if you have time'}
+                        aria-hidden
                       >
-                        {checked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                        <UrgencyIcon className="w-4 h-4" />
                       </div>
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <div
                           className={`text-xs sm:text-sm font-semibold ${
                             checked ? 'line-through text-stone-500' : 'text-stone-900'
@@ -473,6 +610,14 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                           {item.description}
                         </p>
                       </div>
+                      <div
+                        className={`w-5 h-5 rounded-md flex items-center justify-center shrink-0 mt-0.5 transition-colors ${
+                          checked ? 'bg-emerald-700 text-white' : 'border border-stone-300 bg-stone-50'
+                        }`}
+                        aria-hidden
+                      >
+                        {checked && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                      </div>
                     </button>
                   );
                 })}
@@ -483,7 +628,7 @@ export const TonightPage: React.FC<TonightPageProps> = ({
                   className="w-full py-2.5 px-4 rounded-xl font-medium text-xs bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 transition-colors flex items-center justify-center gap-2"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  Re-run your evening checklist
+                  Refresh tonight&apos;s suggestions
                 </button>
               </div>
             )}

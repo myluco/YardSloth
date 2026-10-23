@@ -36,9 +36,13 @@ class YardSlothCrewPipeline:
         """Run Frost Watch Agent to evaluate tonight's freeze hazard."""
         return self.frost.evaluate_frost_threat()
 
-    def run_evening_checklist(self):
-        """On-demand evening checklist from user's plants + tonight's forecast."""
-        return evening_checklist_agent.generate()
+    def get_evening_checklist_cached(self):
+        """Today's saved tonight suggestions, if any."""
+        return evening_checklist_agent.get_cached_for_today()
+
+    def run_evening_checklist(self, *, force_refresh: bool = True):
+        """Evening checklist from user's plants + tonight's forecast."""
+        return evening_checklist_agent.generate(force_refresh=force_refresh)
 
 pipeline = YardSlothCrewPipeline()
 

@@ -366,28 +366,55 @@ export const api = {
     return res.json();
   },
 
-  async toggleFrostSimulation(): Promise<{ mock_frost_simulation: boolean }> {
+  async toggleFrostSimulation(): Promise<{
+    mock_frost_simulation: boolean;
+    forecast?: import('./types').ForecastDay[];
+    alert?: import('./types').FrostAlert;
+    simulationActive?: boolean;
+  }> {
     const res = await fetch('/api/forecast/toggle-simulation', { method: 'POST' });
     if (!res.ok) throw new Error('Failed to toggle frost simulation');
     return res.json();
   },
 
-  async generateEveningChecklist(): Promise<{
-    items: EveningChecklistItem[];
-    source: string;
-    tonight_low_f?: number;
-    message?: string | null;
-  }> {
+  async getEveningChecklist(): Promise<EveningChecklistResponse> {
+    const res = await fetch('/api/tonight/evening-checklist');
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error((body as { error?: string }).error || 'Could not load tonight suggestions');
+    }
+    return body as EveningChecklistResponse;
+  },
+
+  async generateEveningChecklist(): Promise<EveningChecklistResponse> {
     const res = await fetch('/api/tonight/evening-checklist', { method: 'POST' });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
       throw new Error((body as { error?: string }).error || 'Evening checklist agent failed');
     }
-    return body as {
-      items: EveningChecklistItem[];
-      source: string;
-      tonight_low_f?: number;
-      message?: string | null;
-    };
+    return body as EveningChecklistResponse;
   },
+
+  async saveEveningChecklistChecked(checked: Record<string, boolean>): Promise<void> {
+    const res = await fetch('/api/tonight/evening-checklist', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ checked }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error((body as { error?: string }).error || 'Could not save checklist progress');
+    }
+  },
+};
+
+export type EveningChecklistResponse = {
+  items: EveningChecklistItem[];
+  source?: string | null;
+  tonight_low_f?: number | null;
+  message?: string | null;
+  generated_at?: string | null;
+  calendar_day?: string | null;
+  checked?: Record<string, boolean>;
+  from_cache?: boolean;
 };

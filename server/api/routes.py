@@ -357,14 +357,37 @@ def handle_get_forecast():
     return 200, status
 
 
+def handle_get_evening_checklist():
+    return 200, pipeline.get_evening_checklist_cached()
+
+
 def handle_post_evening_checklist():
-    return 200, pipeline.run_evening_checklist()
+    return 200, pipeline.run_evening_checklist(force_refresh=True)
+
+
+def handle_patch_evening_checklist_checked(body):
+    checked = body.get("checked") if isinstance(body, dict) else None
+    if not isinstance(checked, dict):
+        return 400, {"error": "checked object required"}
+    snapshot = memory.update_evening_checklist_checked(
+        {str(k): bool(v) for k, v in checked.items()}
+    )
+    if not snapshot:
+        return 404, {"error": "No tonight suggestions saved for today"}
+    return 200, snapshot
 
 def handle_toggle_simulation():
     settings = memory.get_settings()
-    new_val = not settings.get("mock_frost_simulation", True)
+    new_val = not settings.get("mock_frost_simulation", False)
     memory.update_settings({"mock_frost_simulation": new_val})
-    return 200, {"mock_frost_simulation": new_val}
+    memory.clear_evening_checklist_daily()
+    status = pipeline.run_frost_watch()
+    return 200, {
+        "mock_frost_simulation": new_val,
+        "forecast": status.get("forecast"),
+        "alert": status.get("alert"),
+        "simulationActive": new_val,
+    }
 
 def handle_export_ics():
     tasks = memory.get_tasks()

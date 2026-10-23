@@ -8,6 +8,11 @@ from copy import deepcopy
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 
+from agents.memory.evening_checklist_store import (
+    is_evening_checklist_fresh,
+    local_calendar_day,
+    normalize_evening_checklist_snapshot,
+)
 from agents.memory.persistence import (
     default_state_path,
     load_state,
@@ -77,6 +82,7 @@ class AgentMemory:
         self._forecast_cache: Optional[Dict[str, Any]] = None
         self._settings: Dict[str, Any] = deepcopy(DEFAULT_SETTINGS)
         self._plant_knowledge_cache: Dict[str, Dict[str, Any]] = {}
+        self._evening_checklist_daily: Optional[Dict[str, Any]] = None
         self._state_path = default_state_path()
         self._load_from_disk()
 
@@ -91,6 +97,14 @@ class AgentMemory:
         self._candidates = self._sanitize_candidates(raw_candidates)
         self._tasks = list(stored.get("tasks", []))
         self._plant_knowledge_cache = dict(stored.get("plant_knowledge_cache", {}))
+        raw_evening = stored.get("evening_checklist_daily")
+        self._evening_checklist_daily = (
+            dict(raw_evening) if isinstance(raw_evening, dict) else None
+        )
+        if self._evening_checklist_daily and not is_evening_checklist_fresh(
+            self._evening_checklist_daily
+        ):
+            self._evening_checklist_daily = None
         self.rebuild_yard_location_labels_from_plants()
         backfilled = self._backfill_care_refreshed_at(self._plants)
         backfilled |= self._backfill_care_refreshed_at(self._candidates)
@@ -138,10 +152,49 @@ class AgentMemory:
             "candidates": self._candidates,
             "tasks": self._tasks,
             "plant_knowledge_cache": self._plant_knowledge_cache,
+            "evening_checklist_daily": self._evening_checklist_daily,
         }
 
     def persist(self) -> None:
         save_state(self._snapshot(), self._state_path)
+
+    def get_evening_checklist_daily(self) -> Optional[Dict[str, Any]]:
+        return normalize_evening_checklist_snapshot(self._evening_checklist_daily)
+
+    def save_evening_checklist_daily(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        checked = payload.get("checked")
+        if not isinstance(checked, dict):
+            checked = {}
+        snapshot = {
+            "calendar_day": payload.get("calendar_day") or local_calendar_day(),
+            "generated_at": payload.get("generated_at")
+            or datetime.now().isoformat(timespec="seconds"),
+            "items": list(payload.get("items") or []),
+            "source": payload.get("source"),
+            "tonight_low_f": payload.get("tonight_low_f"),
+            "message": payload.get("message"),
+            "checked": {str(k): bool(v) for k, v in checked.items()},
+        }
+        self._evening_checklist_daily = snapshot
+        self.persist()
+        normalized = normalize_evening_checklist_snapshot(snapshot)
+        return normalized or {**snapshot, "from_cache": False}
+
+    def clear_evening_checklist_daily(self) -> None:
+        if self._evening_checklist_daily is not None:
+            self._evening_checklist_daily = None
+            self.persist()
+
+    def update_evening_checklist_checked(self, checked: Dict[str, bool]) -> Optional[Dict[str, Any]]:
+        if not self._evening_checklist_daily or not is_evening_checklist_fresh(
+            self._evening_checklist_daily
+        ):
+            return None
+        self._evening_checklist_daily["checked"] = {
+            str(k): bool(v) for k, v in (checked or {}).items()
+        }
+        self.persist()
+        return normalize_evening_checklist_snapshot(self._evening_checklist_daily)
 
     def _plant_profile_climate_scope(self) -> str:
         from agents.assets.prompts import PLANT_PROFILE_SCHEMA_VERSION

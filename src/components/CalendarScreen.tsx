@@ -11,6 +11,8 @@ import {
   RefreshCw,
   Search,
   Filter,
+  GitBranch,
+  Bean,
 } from 'lucide-react';
 import { GardenTask, TaskType } from '../types';
 import { apiClient } from '../api/client';
@@ -61,6 +63,10 @@ export const CalendarScreen: React.FC<CalendarScreenProps> = ({
         return <ShieldAlert className="w-3.5 h-3.5 text-amber-700" />;
       case 'mulch':
         return <Layers className="w-3.5 h-3.5 text-amber-900" />;
+      case 'propagate':
+        return <GitBranch className="w-3.5 h-3.5 text-violet-700" />;
+      case 'seed':
+        return <Bean className="w-3.5 h-3.5 text-lime-800" />;
       default:
         return <CalendarIcon className="w-3.5 h-3.5 text-stone-600" />;
     }
@@ -153,6 +159,8 @@ export const CalendarScreen: React.FC<CalendarScreenProps> = ({
             { id: 'all', label: 'All Chores' },
             { id: 'prune', label: 'Pruning' },
             { id: 'fertilize', label: 'Feeding' },
+            { id: 'propagate', label: 'Propagation' },
+            { id: 'seed', label: 'Seed sowing' },
             { id: 'frost_protect', label: 'Frost Watch' },
             { id: 'mulch', label: 'Winterizing' },
           ].map((f) => (

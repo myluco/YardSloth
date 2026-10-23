@@ -61,6 +61,25 @@ export const FrostBanner: React.FC<FrostBannerProps> = ({
               </p>
             </div>
           </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onToggleSimulation}
+              className="text-xs font-semibold px-3 py-1.5 rounded-lg border border-current/20 bg-white/60 hover:bg-white transition-colors"
+            >
+              {simulationActive ? 'Disable demo freeze' : 'Simulate 31°F tonight'}
+            </button>
+            {isFreezing && (
+              <button
+                type="button"
+                onClick={onViewTonight}
+                className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-stone-900 text-white hover:bg-stone-800 transition-colors"
+              >
+                Tonight tab
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

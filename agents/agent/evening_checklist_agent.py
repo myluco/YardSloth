@@ -5,11 +5,16 @@ Builds a same-evening action checklist from the user's confirmed plants
 and live frost/forecast context. Invoked only when the user requests it.
 """
 
+from datetime import datetime
 from typing import Any, Dict, List
+
+from agents.memory.evening_checklist_store import local_calendar_day
 
 from agents.agent.frost_agent import frost_agent
 from agents.assets.prompts import build_evening_checklist_user_prompt, format_garden_context_block
 from agents.llm.errors import OllamaError
+from agents.llm.checklist_dedupe import dedupe_checklist_items
+from agents.llm.checklist_urgency import apply_checklist_urgency
 from agents.llm.graphs.evening_checklist_workflow import run_evening_checklist_workflow
 from agents.memory.agent_memory import memory, plant_location_labels
 
@@ -38,6 +43,7 @@ def _deterministic_checklist(
             items.append(
                 {
                     "id": f"evening-{plant_id}-shelter",
+                    "urgency": "urgent",
                     "title": f"Shelter {name} ({loc}) before sundown",
                     "description": (
                         f"Forecast low {eval_low}°F is at or below this plant's {threshold}°F limit. "
@@ -57,6 +63,7 @@ def _deterministic_checklist(
             items.append(
                 {
                     "id": f"evening-{plant_id}-cover",
+                    "urgency": "urgent",
                     "title": f"Cover {name} at {loc}",
                     "description": (
                         f"Tonight's low ({eval_low}°F) may damage tissue below {threshold}°F.{bud_note} "
@@ -70,6 +77,7 @@ def _deterministic_checklist(
             items.append(
                 {
                     "id": f"evening-{plant_id}-mulch",
+                    "urgency": "optional",
                     "title": f"Check mulch around {name} ({loc})",
                     "description": (
                         f"Hardy, but an unusually cold night ({eval_low}°F) can still stress crowns. "
@@ -82,6 +90,7 @@ def _deterministic_checklist(
         items.append(
             {
                 "id": "evening-general-monitor",
+                "urgency": "optional",
                 "title": "Monitor overnight temperatures",
                 "description": (
                     f"Forecast low is {eval_low}°F. Your entered plants are within their thresholds tonight; "
@@ -94,13 +103,37 @@ def _deterministic_checklist(
 
 
 class EveningChecklistAgent:
-    def generate(self) -> Dict[str, Any]:
+    def get_cached_for_today(self) -> Dict[str, Any]:
+        cached = memory.get_evening_checklist_daily()
+        if cached:
+            return cached
+        return {
+            "items": [],
+            "source": None,
+            "generated_at": None,
+            "calendar_day": None,
+            "tonight_low_f": None,
+            "message": None,
+            "checked": {},
+            "from_cache": False,
+        }
+
+    def generate(self, *, force_refresh: bool = False) -> Dict[str, Any]:
+        if not force_refresh:
+            cached = memory.get_evening_checklist_daily()
+            if cached and cached.get("items"):
+                return cached
+
         plants = memory.get_plants()
         if not plants:
             return {
                 "items": [],
                 "source": "none",
+                "generated_at": None,
+                "calendar_day": None,
                 "message": "Add and confirm plants in your yard before building an evening checklist.",
+                "checked": {},
+                "from_cache": False,
             }
 
         frost_status = frost_agent.evaluate_frost_threat()
@@ -135,10 +168,13 @@ class EveningChecklistAgent:
             forecast_location=str(frost_status.get("location") or ""),
         )
 
+        plant_names = [str(p.get("common_name") or "").strip() for p in plants]
+        plant_names = [n for n in plant_names if n]
+
         source = "rules"
         items: List[Dict[str, Any]] = []
         try:
-            items, source = run_evening_checklist_workflow(user_prompt)
+            items, source = run_evening_checklist_workflow(user_prompt, plant_names)
         except OllamaError as exc:
             print("Evening checklist Ollama fallback:", exc)
 
@@ -151,6 +187,7 @@ class EveningChecklistAgent:
             items = [
                 {
                     "id": "evening-clear",
+                    "urgency": "optional",
                     "title": "No frost-protection steps needed tonight",
                     "description": (
                         f"With an effective low around {eval_low}°F, none of your "
@@ -160,12 +197,22 @@ class EveningChecklistAgent:
                 }
             ]
 
-        return {
+        items = apply_checklist_urgency(items, eval_low_f=eval_low)
+        items = dedupe_checklist_items(items, plant_names)
+        items = apply_checklist_urgency(items, eval_low_f=eval_low)
+
+        payload = {
             "items": items,
             "source": source,
             "tonight_low_f": eval_low,
             "message": None,
+            "calendar_day": local_calendar_day(),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "checked": {},
         }
+        saved = memory.save_evening_checklist_daily(payload)
+        saved["from_cache"] = False
+        return saved
 
 
 evening_checklist_agent = EveningChecklistAgent()

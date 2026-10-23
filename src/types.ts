@@ -20,7 +20,15 @@ export interface PlantCandidate {
   created_at: string;
 }
 
-export type TaskType = 'prune' | 'fertilize' | 'mulch' | 'frost_protect' | 'harvest' | 'inspect';
+export type TaskType =
+  | 'prune'
+  | 'fertilize'
+  | 'mulch'
+  | 'propagate'
+  | 'seed'
+  | 'frost_protect'
+  | 'harvest'
+  | 'inspect';
 
 export interface GardenTask {
   id: string;

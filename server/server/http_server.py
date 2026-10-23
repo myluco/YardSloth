@@ -83,6 +83,11 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        elif path == "/api/tonight/evening-checklist":
+            status, data = routes.handle_get_evening_checklist()
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
+
         elif path == "/api/ollama/status":
             status, data = routes.handle_get_ollama_status()
             self._set_headers(status)
@@ -161,6 +166,19 @@ class YardSlothHTTPHandler(BaseHTTPRequestHandler):
             self._set_headers(status)
             self.wfile.write(json.dumps(data).encode("utf-8"))
 
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode("utf-8"))
+
+    def do_PATCH(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        body = self._read_json_body()
+
+        if path == "/api/tonight/evening-checklist":
+            status, data = routes.handle_patch_evening_checklist_checked(body)
+            self._set_headers(status)
+            self.wfile.write(json.dumps(data).encode("utf-8"))
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Endpoint not found"}).encode("utf-8"))

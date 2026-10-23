@@ -88,9 +88,13 @@ export default function App() {
     try {
       const result = await api.toggleFrostSimulation();
       setSimulationActive(result.mock_frost_simulation);
-      const forecastData = await api.getForecast();
-      setForecast(forecastData.forecast);
-      setAlert(forecastData.alert);
+      if (result.forecast) setForecast(result.forecast);
+      if (result.alert) setAlert(result.alert);
+      if (!result.forecast || !result.alert) {
+        const forecastData = await api.getForecast();
+        setForecast(forecastData.forecast);
+        setAlert(forecastData.alert);
+      }
     } catch (err) {
       console.error(err);
     }
@@ -416,6 +420,8 @@ export default function App() {
             alert={alert}
             plants={plants}
             settings={settings}
+            simulationActive={simulationActive}
+            onToggleSimulation={handleToggleSimulation}
             onUpdateLocation={handleUpdateLocation}
             onUseGPS={handleUseGPS}
             onRefresh={handleRefreshForecast}

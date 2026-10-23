@@ -43,7 +43,15 @@ export interface PlantCandidate {
   llm_warnings?: string[];
 }
 
-export type TaskType = 'prune' | 'fertilize' | 'mulch' | 'frost_protect' | 'harvest' | 'inspect';
+export type TaskType =
+  | 'prune'
+  | 'fertilize'
+  | 'mulch'
+  | 'propagate'
+  | 'seed'
+  | 'frost_protect'
+  | 'harvest'
+  | 'inspect';
 
 export interface GardenTask {
   id: string;
@@ -59,10 +67,14 @@ export interface GardenTask {
   priority: 'low' | 'normal' | 'high';
 }
 
+export type EveningChecklistUrgency = 'urgent' | 'optional';
+
 export interface EveningChecklistItem {
   id: string;
   title: string;
   description: string;
+  /** urgent = weather-driven before sundown; optional = nice-to-do, not required */
+  urgency?: EveningChecklistUrgency;
 }
 
 export interface FrostAlert {
@@ -102,6 +114,9 @@ export interface ForecastDay {
   temp_max: number;
   temp_min: number;
   apparent_min: number;
+  /** Present when demo freeze mode overrides tonight's low for planning. */
+  simulated?: boolean;
+  actual_temp_min?: number;
   precip_prob: number;
   weather_code: number;
   condition_text: string;

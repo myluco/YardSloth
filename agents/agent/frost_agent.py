@@ -96,6 +96,15 @@ class FrostWatchAgent:
         # If user explicitly opted into sandbox test, evaluate against 31°F
         eval_temp = 31 if is_simulated else actual_tonight_low
 
+        if is_simulated and forecast_list:
+            tonight_row = dict(forecast_list[0])
+            tonight_row["temp_min"] = 31
+            tonight_row["apparent_min"] = 31
+            tonight_row["frost_risk"] = "freeze_warning"
+            tonight_row["simulated"] = True
+            tonight_row["actual_temp_min"] = actual_tonight_low
+            forecast_list[0] = tonight_row
+
         tender = [p for p in plants if p.get("frost_sensitivity") == "tender"]
         semi_hardy = [p for p in plants if p.get("frost_sensitivity") == "semi_hardy"]
 
